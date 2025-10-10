@@ -329,9 +329,10 @@ async def audit_services(
         logger.debug(f'audit_services: has_wildcards = {has_wildcards}')
 
         # Expand wildcard patterns using shared utility
+        filtering_stats = {'total_services': 0, 'instrumented_services': 0, 'filtered_out': 0}
         if has_wildcards:
             logger.debug('Wildcard patterns detected - applying service expansion')
-            provided = expand_service_wildcard_patterns(
+            provided, filtering_stats = expand_service_wildcard_patterns(
                 provided, unix_start, unix_end, appsignals_client
             )
             logger.debug(f'Wildcard expansion completed - {len(provided)} total targets')
@@ -357,6 +358,10 @@ async def audit_services(
             f'🎯 Scope: {len(normalized_targets)} service target(s) | Region: {region}\n'
             f'⏰ Time: {unix_start}–{unix_end}\n'
         )
+
+        # Add filtering statistics if services were filtered
+        if filtering_stats['total_services'] > 0:
+            banner += f'🔍 Service Filtering: {filtering_stats["instrumented_services"]} instrumented out of {filtering_stats["total_services"]} total services ({filtering_stats["filtered_out"]} filtered out)\n'
 
         if len(normalized_targets) > BATCH_SIZE_THRESHOLD:
             banner += f'📦 Batching: Processing {len(normalized_targets)} targets in batches of {BATCH_SIZE_THRESHOLD}\n'

@@ -254,6 +254,54 @@ def _create_service_target(
     }
 
 
+def _filter_instrumented_services(all_services: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Filter out uninstrumented and aws native services.
+
+    Args:
+        all_services: List of service summaries from list_services API
+
+    Returns:
+        List of services that are instrumented
+    """
+    instrumented_services = []
+
+    for service in all_services:
+        service_attrs = service.get('KeyAttributes', {})
+        service_name = service_attrs.get('Name', '')
+        service_type = service_attrs.get('Type', '')
+        environment = service_attrs.get('Environment', '')
+
+        # Filter out services without proper names or that are not actual services
+        if not service_name or service_name == 'Unknown' or service_type != 'Service':
+            logger.debug(
+                f"Skipping service: Name='{service_name}', Type='{service_type}', Environment='{environment}'"
+            )
+            continue
+
+        # Check InstrumentationType in AttributeMaps to filter out UNINSTRUMENTED services
+        attribute_maps = service.get('AttributeMaps', [])
+        is_instrumented = True  # Default to instrumented if no InstrumentationType found
+
+        for attr_map in attribute_maps:
+            if isinstance(attr_map, dict) and 'InstrumentationType' in attr_map:
+                instrumentation_type = attr_map['InstrumentationType']
+                if instrumentation_type == 'UNINSTRUMENTED' or instrumentation_type == 'AWS_NATIVE':
+                    is_instrumented = False
+                    logger.debug(
+                        f"Filtering out uninstrumented service: Name='{service_name}', InstrumentationType='{instrumentation_type}'"
+                    )
+                    break
+
+        if is_instrumented:
+            instrumented_services.append(service)
+            logger.debug(
+                f"Including instrumented service: Name='{service_name}', Environment='{environment}'"
+            )
+
+    logger.info(f"Filtered services: {len(instrumented_services)} instrumented out of {len(all_services)} total services")
+    return instrumented_services
+
+
 def parse_auditors(
     auditors_value: Union[str, None, Any], default_auditors: List[str]
 ) -> List[str]:
@@ -295,8 +343,13 @@ def parse_auditors(
 
 def expand_service_wildcard_patterns(
     targets: List[dict], unix_start: int, unix_end: int, appsignals_client=None
-) -> List[dict]:
-    """Expand wildcard patterns for service targets only."""
+) -> tuple[List[dict], Dict[str, int]]:
+    """Expand wildcard patterns for service targets only.
+
+    Returns:
+        tuple: (expanded_targets, filtering_stats)
+        filtering_stats contains: {'total_services': int, 'instrumented_services': int, 'filtered_out': int}
+    """
     from .utils import calculate_name_similarity
 
     if appsignals_client is None:
@@ -305,6 +358,7 @@ def expand_service_wildcard_patterns(
     expanded_targets = []
     service_patterns = []
     service_fuzzy_matches = []
+    filtering_stats = {'total_services': 0, 'instrumented_services': 0, 'filtered_out': 0}
 
     logger.debug(f'expand_service_wildcard_patterns: Processing {len(targets)} targets')
 
@@ -364,40 +418,42 @@ def expand_service_wildcard_patterns(
             )
             all_services = services_response.get('ServiceSummaries', [])
 
+            # Update filtering stats
+            filtering_stats['total_services'] = len(all_services)
+
+            # Filter out uninstrumented services using the helper function
+            instrumented_services = _filter_instrumented_services(all_services)
+
+            # Update filtering stats
+            filtering_stats['instrumented_services'] = len(instrumented_services)
+            filtering_stats['filtered_out'] = filtering_stats['total_services'] - filtering_stats['instrumented_services']
+
             # Handle wildcard patterns
             for original_target, pattern in service_patterns:
                 search_term = pattern.strip('*').lower() if pattern != '*' else ''
                 matches_found = 0
 
-                for service in all_services:
+                for service in instrumented_services:
                     service_attrs = service.get('KeyAttributes', {})
                     service_name = service_attrs.get('Name', '')
-                    service_type = service_attrs.get('Type', '')
                     environment = service_attrs.get('Environment', '')
-
-                    # Filter out services without proper names or that are not actual services
-                    if not service_name or service_name == 'Unknown' or service_type != 'Service':
-                        logger.debug(
-                            f"Skipping service: Name='{service_name}', Type='{service_type}', Environment='{environment}'"
-                        )
-                        continue
 
                     # Apply search filter
                     if search_term == '' or search_term in service_name.lower():
                         expanded_targets.append(_create_service_target(service_name, environment))
                         matches_found += 1
                         logger.debug(
-                            f"Added service: Name='{service_name}', Environment='{environment}'"
+                            f"Added instrumented service: Name='{service_name}', Environment='{environment}'"
                         )
 
-                logger.debug(f"Service pattern '{pattern}' expanded to {matches_found} targets")
+                logger.debug(f"Service pattern '{pattern}' expanded to {matches_found} instrumented targets")
 
             # Handle fuzzy matches for inexact service names
             for original_target, inexact_name in service_fuzzy_matches:
                 best_matches = []
 
-                # Calculate similarity scores for all services
-                for service in all_services:
+                # Calculate similarity scores for all instrumented services
+                for service in instrumented_services:
                     service_attrs = service.get('KeyAttributes', {})
                     service_name = service_attrs.get('Name', '')
                     if not service_name:
@@ -422,14 +478,14 @@ def expand_service_wildcard_patterns(
                         matched_services = best_matches[:3]
 
                     logger.info(
-                        f"Fuzzy matching service '{inexact_name}' found {len(matched_services)} candidates:"
+                        f"Fuzzy matching service '{inexact_name}' found {len(matched_services)} instrumented candidates:"
                     )
                     for service_name, environment, score in matched_services:
                         logger.info(f"  - '{service_name}' in '{environment}' (score: {score})")
                         expanded_targets.append(_create_service_target(service_name, environment))
                 else:
                     logger.warning(
-                        f"No fuzzy matches found for service name '{inexact_name}' (no candidates above threshold)"
+                        f"No fuzzy matches found for service name '{inexact_name}' (no instrumented candidates above threshold)"
                     )
                     # Keep the original target - let the API handle the error
                     expanded_targets.append(original_target)
@@ -448,7 +504,7 @@ def expand_service_wildcard_patterns(
                     f'Error: {str(e)}'
                 )
 
-    return expanded_targets
+    return expanded_targets, filtering_stats
 
 
 def expand_slo_wildcard_patterns(targets: List[dict], appsignals_client=None) -> List[dict]:

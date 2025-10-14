@@ -280,16 +280,13 @@ def _filter_instrumented_services(all_services: List[Dict[str, Any]]) -> List[Di
 
         # Check InstrumentationType in AttributeMaps to filter out UNINSTRUMENTED services
         attribute_maps = service.get('AttributeMaps', [])
-        is_instrumented = True  # Default to instrumented if no InstrumentationType found
+        is_instrumented = False
 
         for attr_map in attribute_maps:
             if isinstance(attr_map, dict) and 'InstrumentationType' in attr_map:
                 instrumentation_type = attr_map['InstrumentationType']
-                if instrumentation_type == 'UNINSTRUMENTED' or instrumentation_type == 'AWS_NATIVE':
-                    is_instrumented = False
-                    logger.debug(
-                        f"Filtering out uninstrumented service: Name='{service_name}', InstrumentationType='{instrumentation_type}'"
-                    )
+                if instrumentation_type == 'INSTRUMENTED':
+                    is_instrumented = True
                     break
 
         if is_instrumented:

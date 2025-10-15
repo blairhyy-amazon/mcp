@@ -20,6 +20,14 @@ import tempfile
 from datetime import datetime, timezone
 from loguru import logger
 from typing import Any, Dict, List, Optional, Union
+from .batch_state import (
+    BatchProcessingState,
+    store_batch_state,
+    get_batch_state,
+    cleanup_session,
+    format_batch_response_string,
+    format_final_results_string
+)
 
 
 # Constants
@@ -449,6 +457,307 @@ def expand_service_wildcard_patterns(
                 )
 
     return expanded_targets
+
+
+async def execute_single_batch(
+    batch_targets: List[Dict[str, Any]], 
+    state: BatchProcessingState
+) -> Dict[str, Any]:
+    """Execute a single batch and return its results with metadata."""
+    from .aws_clients import appsignals_client
+    
+    # File log path
+    desired_log_path = os.environ.get('AUDITOR_LOG_PATH', tempfile.gettempdir())
+    try:
+        if desired_log_path.endswith(os.sep) or os.path.isdir(desired_log_path):
+            os.makedirs(desired_log_path, exist_ok=True)
+            log_path = os.path.join(desired_log_path, 'aws_api.log')
+        else:
+            os.makedirs(os.path.dirname(desired_log_path) or '.', exist_ok=True)
+            log_path = desired_log_path
+    except Exception:
+        temp_dir = tempfile.gettempdir()
+        os.makedirs(temp_dir, exist_ok=True)
+        log_path = os.path.join(temp_dir, 'aws_api.log')
+
+    batch_idx = state.current_batch_idx
+    total_batches = len(state.target_batches)
+    
+    logger.info(f'Processing batch {batch_idx}/{total_batches} with {len(batch_targets)} targets')
+
+    # Build API input for this specific batch
+    batch_input_obj = {
+        'StartTime': datetime.fromtimestamp(state.input_obj['StartTime'], tz=timezone.utc),
+        'EndTime': datetime.fromtimestamp(state.input_obj['EndTime'], tz=timezone.utc),
+        'AuditTargets': batch_targets,
+    }
+    if 'Auditors' in state.input_obj:
+        batch_input_obj['Auditors'] = state.input_obj['Auditors']
+
+    # Log API invocation details
+    api_pretty_input = json.dumps(
+        {
+            'StartTime': state.input_obj['StartTime'],
+            'EndTime': state.input_obj['EndTime'],
+            'AuditTargets': batch_targets,
+            'Auditors': state.input_obj.get('Auditors', []),
+        },
+        indent=2,
+    )
+
+    batch_input_for_logging = {
+        'StartTime': batch_input_obj['StartTime'].isoformat(),
+        'EndTime': batch_input_obj['EndTime'].isoformat(),
+        'AuditTargets': batch_input_obj['AuditTargets'],
+    }
+    if 'Auditors' in batch_input_obj:
+        batch_input_for_logging['Auditors'] = batch_input_obj['Auditors']
+
+    batch_payload_json = json.dumps(batch_input_for_logging, indent=2)
+
+    logger.info('═' * 80)
+    logger.info(f'BATCH {batch_idx}/{total_batches} - {datetime.now(timezone.utc).isoformat()}')
+    logger.info(state.banner.strip())
+    logger.info('---- API INVOCATION ----')
+    logger.info('appsignals_client.list_audit_findings()')
+    logger.info('---- API PARAMETERS (JSON) ----')
+    logger.info(api_pretty_input)
+    logger.info('---- ACTUAL AWS API PAYLOAD ----')
+    logger.info(batch_payload_json)
+    logger.info('---- END PARAMETERS ----')
+
+    # Write detailed payload to log file
+    try:
+        with open(log_path, 'a') as f:
+            f.write('═' * 80 + '\n')
+            f.write(f'BATCH {batch_idx}/{total_batches} - {datetime.now(timezone.utc).isoformat()}\n')
+            f.write(state.banner.strip() + '\n')
+            f.write('---- API INVOCATION ----\n')
+            f.write('appsignals_client.list_audit_findings()\n')
+            f.write('---- API PARAMETERS (JSON) ----\n')
+            f.write(api_pretty_input + '\n')
+            f.write('---- ACTUAL AWS API PAYLOAD ----\n')
+            f.write(batch_payload_json + '\n')
+            f.write('---- END PARAMETERS ----\n\n')
+    except Exception as log_error:
+        logger.warning(f'Failed to write audit log to {log_path}: {log_error}')
+
+    try:
+        # Call the Application Signals API for this batch
+        batch_response = appsignals_client.list_audit_findings(**batch_input_obj)  # type: ignore[attr-defined]
+        
+        # Add batch metadata to the response
+        enriched_response = {
+            **batch_response,  # Original AWS API response
+            "BatchMetadata": {
+                "batch_index": batch_idx,
+                "total_batches": total_batches,
+                "targets_in_batch": len(batch_targets),
+                "batch_targets": batch_targets,
+                "processing_timestamp": datetime.now(timezone.utc).isoformat()
+            }
+        }
+        
+        # Log successful response
+        observation_text = json.dumps(enriched_response, indent=2, default=str)
+        
+        if not batch_response.get('AuditFindings'):
+            try:
+                with open(log_path, 'a') as f:
+                    f.write(f'📭 Batch {batch_idx}: No findings returned.\n')
+                    f.write('---- END RESPONSE ----\n\n')
+            except Exception as log_error:
+                logger.warning(f'Failed to write audit log to {log_path}: {log_error}')
+            logger.info(f'📭 Batch {batch_idx}: No findings returned.\n---- END RESPONSE ----')
+        else:
+            try:
+                with open(log_path, 'a') as f:
+                    f.write(f'---- BATCH {batch_idx} API RESPONSE (JSON) ----\n')
+                    f.write(observation_text + '\n')
+                    f.write('---- END RESPONSE ----\n\n')
+            except Exception as log_error:
+                logger.warning(f'Failed to write audit log to {log_path}: {log_error}')
+            logger.info(
+                f'---- BATCH {batch_idx} API RESPONSE (JSON) ----\n'
+                + observation_text
+                + '\n---- END RESPONSE ----'
+            )
+        
+        return enriched_response
+        
+    except Exception as e:
+        error_msg = str(e)
+        try:
+            with open(log_path, 'a') as f:
+                f.write(f'---- BATCH {batch_idx} API ERROR ----\n')
+                f.write(error_msg + '\n')
+                f.write('---- END ERROR ----\n\n')
+        except Exception as log_error:
+            logger.warning(f'Failed to write audit log to {log_path}: {log_error}')
+        logger.error(f'---- BATCH {batch_idx} API ERROR ----\n' + error_msg + '\n---- END ERROR ----')
+
+        # Return error information for this batch
+        return {
+            "BatchError": {
+                "batch_index": batch_idx,
+                "total_batches": total_batches,
+                "error_message": error_msg,
+                "targets_in_batch": len(batch_targets),
+                "failed_targets": batch_targets,
+                "processing_timestamp": datetime.now(timezone.utc).isoformat()
+            }
+        }
+
+
+async def start_batch_audit(input_obj: Dict[str, Any], region: str, banner: str) -> str:
+    """Initialize batch processing and return first batch results."""
+    # Create batch state
+    state = BatchProcessingState(input_obj, region, banner)
+    
+    # Check if we have any batches to process
+    if not state.target_batches:
+        return f"{banner}No targets to process."
+    
+    # Process first batch
+    first_batch = state.get_next_batch()
+    if not first_batch:
+        return f"{banner}No targets to process."
+        
+    # Execute first batch
+    batch_result = await execute_single_batch(first_batch, state)
+    state.add_batch_result(batch_result)
+    
+    # Store state for continuation
+    session_id = store_batch_state(state)
+    
+    # Return first batch results with continuation prompt
+    return format_batch_response_string(batch_result, state, session_id)
+
+
+async def continue_batch_audit(session_id: str) -> str:
+    """Process next batch in an existing audit session."""
+    state = get_batch_state(session_id)
+    if not state:
+        return "Error: Invalid or expired batch session ID. Sessions expire after 1 hour of inactivity."
+        
+    if not state.has_more_batches():
+        progress = state.get_progress_summary()
+        return f"""No more batches to process.
+
+📊 Current Status:
+- Processed: {progress['processed_batches']}/{progress['total_batches']} batches
+- Successful: {progress['successful_batches']}
+- Failed: {progress['failed_batches']}
+- Total Findings: {progress['total_findings']}
+
+Use finalize_audit_session(batch_session_id="{session_id}") to get final aggregated results."""
+        
+    # Process next batch
+    next_batch = state.get_next_batch()
+    if not next_batch:
+        return "Error: No more batches available."
+        
+    batch_result = await execute_single_batch(next_batch, state)
+    state.add_batch_result(batch_result)
+    
+    # Return batch results with continuation options
+    return format_batch_response_string(batch_result, state, session_id)
+
+
+async def finalize_audit_session(session_id: str) -> str:
+    """Finalize batch processing session and return aggregated results."""
+    state = get_batch_state(session_id)
+    if not state:
+        return "Error: Invalid or expired batch session ID. Sessions expire after 1 hour of inactivity."
+    
+    # Aggregate all batch results that were stored in state.processed_results
+    aggregated_findings = []
+    successful_batches = 0
+    failed_batches = 0
+    total_targets_processed = 0
+    
+    for batch_result in state.processed_results:
+        if "AuditFindings" in batch_result:
+            aggregated_findings.extend(batch_result["AuditFindings"])
+            successful_batches += 1
+            batch_metadata = batch_result.get("BatchMetadata", {})
+            total_targets_processed += batch_metadata.get("targets_in_batch", 0)
+        elif "BatchError" in batch_result:
+            failed_batches += 1
+            batch_error = batch_result.get("BatchError", {})
+            total_targets_processed += batch_error.get("targets_in_batch", 0)
+    
+    # Create final aggregated response
+    final_result = {
+        "AuditFindings": aggregated_findings,
+        "BatchSummary": {
+            "TotalBatches": len(state.target_batches),
+            "SuccessfulBatches": successful_batches,
+            "FailedBatches": failed_batches,
+            "TotalTargetsProcessed": total_targets_processed,
+            "TotalFindingsCount": len(aggregated_findings)
+        }
+    }
+    
+    # Add error information if there were failed batches
+    if failed_batches > 0:
+        error_details = []
+        for batch_result in state.processed_results:
+            if "BatchError" in batch_result:
+                batch_error = batch_result["BatchError"]
+                error_details.append({
+                    "batch": batch_error["batch_index"],
+                    "error": batch_error["error_message"],
+                    "targets_count": batch_error["targets_in_batch"]
+                })
+        final_result["BatchErrors"] = error_details
+    
+    # Clean up session
+    cleanup_session(session_id)
+    
+    # Return final aggregated results as formatted string
+    return format_final_results_string(final_result, state)
+
+
+async def get_batch_session_status(session_id: str) -> str:
+    """Get current status of batch processing session."""
+    state = get_batch_state(session_id)
+    if not state:
+        return "Error: Invalid or expired batch session ID. Sessions expire after 1 hour of inactivity."
+    
+    progress = state.get_progress_summary()
+    
+    # Calculate session age
+    import time
+    session_age_minutes = int((time.time() - state.created_at) / 60)
+    last_activity_minutes = int((time.time() - state.last_activity) / 60)
+    
+    status_response = f"""📊 BATCH SESSION STATUS
+
+🆔 Session ID: {session_id}
+⏱️ Created: {session_age_minutes} minutes ago
+🔄 Last Activity: {last_activity_minutes} minutes ago
+
+📈 PROGRESS:
+- Total Batches: {progress['total_batches']}
+- Processed: {progress['processed_batches']}/{progress['total_batches']}
+- Remaining: {progress['remaining_batches']}
+- Successful: {progress['successful_batches']}
+- Failed: {progress['failed_batches']}
+- Total Findings: {progress['total_findings']}
+
+🎯 NEXT ACTIONS:"""
+
+    if progress['has_more']:
+        status_response += f"""
+- Continue processing: continue_audit_batch(batch_session_id="{session_id}")
+- Get final results: finalize_audit_session(batch_session_id="{session_id}")"""
+    else:
+        status_response += f"""
+- Get final results: finalize_audit_session(batch_session_id="{session_id}")
+- All batches have been processed"""
+
+    return status_response
 
 
 def expand_slo_wildcard_patterns(targets: List[dict], appsignals_client=None) -> List[dict]:

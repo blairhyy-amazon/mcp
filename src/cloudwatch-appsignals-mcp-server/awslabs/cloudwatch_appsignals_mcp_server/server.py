@@ -24,7 +24,12 @@ from .audit_utils import (
     expand_service_wildcard_patterns,
     expand_slo_wildcard_patterns,
     parse_auditors,
+    start_batch_audit,
+    continue_batch_audit,
+    finalize_audit_session,
+    get_batch_session_status,
 )
+from .batch_state import cleanup_expired_sessions, get_active_sessions_count
 from .aws_clients import AWS_REGION, appsignals_client
 from .service_audit_utils import normalize_service_targets, validate_and_enrich_service_targets
 from .service_tools import (
@@ -129,7 +134,7 @@ def _filter_operation_targets(provided):
 async def audit_services(
     service_targets: str = Field(
         ...,
-        description="REQUIRED. JSON array of service targets. Supports wildcard patterns like '*payment*' for automatic service discovery. Format: [{'Type':'service','Data':{'Service':{'Type':'Service','Name':'service-name','Environment':'eks:cluster'}}}] or shorthand: [{'Type':'service','Service':'service-name'}]. Large target lists are automatically processed in batches.",
+        description="REQUIRED. JSON array of service targets. Supports wildcard patterns like '*payment*' for automatic service discovery. Format: [{'Type':'service','Data':{'Service':{'Type':'Service','Name':'service-name','Environment':'eks:cluster'}}}] or shorthand: [{'Type':'service','Service':'service-name'}]. Large target lists are automatically processed in interactive batches.",
     ),
     start_time: Optional[str] = Field(
         default=None,
@@ -142,6 +147,10 @@ async def audit_services(
     auditors: Optional[str] = Field(
         default=None,
         description="Optional. Comma-separated auditors (e.g., 'slo,operation_metric,dependency_metric'). Defaults to 'slo,operation_metric' for fast service health auditing. Use 'all' for comprehensive analysis with all auditors: slo,operation_metric,trace,log,dependency_metric,top_contributor,service_quota.",
+    ),
+    auto_complete: Optional[bool] = Field(
+        default=None,
+        description="Optional. If True, processes all batches automatically and returns final aggregated results. If False, uses interactive batch processing. If None (default), automatically chooses based on target count: ≤5 targets = auto_complete, >5 targets = interactive.",
     ),
 ) -> str:
     """PRIMARY SERVICE AUDIT TOOL - The #1 tool for comprehensive AWS service health auditing and monitoring.
@@ -373,8 +382,39 @@ async def audit_services(
         if auditors_list:
             input_obj['Auditors'] = auditors_list
 
-        # Execute audit API using shared utility
-        result = await execute_audit_api(input_obj, region, banner)
+        # Determine processing mode: auto_complete logic
+        should_use_interactive = False
+        
+        if auto_complete is None:
+            # Auto-decide based on target count
+            should_use_interactive = len(normalized_targets) > BATCH_SIZE_THRESHOLD
+        elif auto_complete is False:
+            # User explicitly requested interactive mode
+            should_use_interactive = True
+        # If auto_complete is True, use automatic mode (should_use_interactive stays False)
+
+        # Execute based on processing mode
+        if should_use_interactive:
+            # Interactive batch processing
+            logger.debug(f'Using interactive batch processing for {len(normalized_targets)} targets')
+            
+            # Update banner for interactive mode
+            interactive_banner = (
+                '[MCP-SERVICE-INTERACTIVE] Application Signals Service Audit (Interactive Mode)\n'
+                f'🎯 Scope: {len(normalized_targets)} service target(s) | Region: {region}\n'
+                f'⏰ Time: {unix_start}–{unix_end}\n'
+                f'📦 Interactive Batching: Processing in batches of {BATCH_SIZE_THRESHOLD} with user control\n\n'
+            )
+            
+            # Clean up expired sessions first
+            cleanup_expired_sessions()
+            
+            # Start interactive batch processing
+            result = await start_batch_audit(input_obj, region, interactive_banner)
+        else:
+            # Automatic batch processing (original behavior)
+            logger.debug(f'Using automatic batch processing for {len(normalized_targets)} targets')
+            result = await execute_audit_api(input_obj, region, banner)
 
         elapsed = timer() - start_time_perf
         logger.debug(f'audit_services completed in {elapsed:.3f}s (region={region})')
@@ -795,6 +835,148 @@ async def audit_service_operations(
 
     except Exception as e:
         logger.error(f'Unexpected error in audit_service_operations: {e}', exc_info=True)
+        return f'Error: {str(e)}'
+
+
+@mcp.tool()
+async def continue_audit_batch(
+    batch_session_id: str = Field(
+        ...,
+        description="Session ID from previous batch processing to continue"
+    )
+) -> str:
+    """Continue processing the next batch in an active audit session.
+    
+    **INTERACTIVE BATCH PROCESSING TOOL**
+    Use this tool to continue processing the next batch of targets in an ongoing audit session.
+    
+    **WHEN TO USE:**
+    - After receiving batch results from audit_services(), audit_slos(), or audit_service_operations()
+    - When you want to process the next batch of targets
+    - To continue an interrupted audit workflow
+    
+    **WORKFLOW:**
+    1. User calls audit_services() with large target list
+    2. System processes first batch and returns session ID
+    3. User calls continue_audit_batch() with session ID to process next batch
+    4. Repeat until all batches are processed
+    5. Call finalize_audit_session() to get aggregated results
+    
+    **RETURNS:**
+    - Results from the next batch with progress information
+    - Continuation instructions if more batches remain
+    - Error message if session is invalid or expired
+    """
+    start_time_perf = timer()
+    logger.debug(f'Starting continue_audit_batch for session {batch_session_id}')
+    
+    try:
+        # Clean up expired sessions first
+        cleanup_expired_sessions()
+        
+        result = await continue_batch_audit(batch_session_id)
+        
+        elapsed = timer() - start_time_perf
+        logger.debug(f'continue_audit_batch completed in {elapsed:.3f}s')
+        return result
+        
+    except Exception as e:
+        logger.error(f'Unexpected error in continue_audit_batch: {e}', exc_info=True)
+        return f'Error: {str(e)}'
+
+
+@mcp.tool()
+async def finalize_audit_session_tool(
+    batch_session_id: str = Field(
+        ..., 
+        description="Session ID to finalize and get aggregated results"
+    )
+) -> str:
+    """Finalize batch processing session and return aggregated results from all batches.
+    
+    **BATCH FINALIZATION TOOL**
+    Use this tool to complete an interactive audit session and get the final aggregated results.
+    
+    **WHEN TO USE:**
+    - After processing all desired batches with continue_audit_batch()
+    - When you want to get the final combined results from all processed batches
+    - To complete an audit workflow and clean up the session
+    
+    **WORKFLOW:**
+    1. Process batches using continue_audit_batch()
+    2. Call finalize_audit_session() to get final results
+    3. Session is automatically cleaned up after finalization
+    
+    **RETURNS:**
+    - Aggregated findings from all processed batches
+    - Comprehensive batch processing summary
+    - Final statistics and any error details
+    
+    **NOTE:** Session is automatically cleaned up after finalization.
+    """
+    start_time_perf = timer()
+    logger.debug(f'Starting finalize_audit_session for session {batch_session_id}')
+    
+    try:
+        # Clean up expired sessions first
+        cleanup_expired_sessions()
+        
+        result = await finalize_audit_session(batch_session_id)
+        
+        elapsed = timer() - start_time_perf
+        logger.debug(f'finalize_audit_session completed in {elapsed:.3f}s')
+        return result
+        
+    except Exception as e:
+        logger.error(f'Unexpected error in finalize_audit_session: {e}', exc_info=True)
+        return f'Error: {str(e)}'
+
+
+@mcp.tool()
+async def get_batch_status_tool(
+    batch_session_id: str = Field(
+        ...,
+        description="Session ID to check batch processing status"
+    )
+) -> str:
+    """Get current status of batch processing session.
+    
+    **BATCH STATUS MONITORING TOOL**
+    Use this tool to check the progress and status of an ongoing batch processing session.
+    
+    **WHEN TO USE:**
+    - To check progress of a long-running batch processing session
+    - To see how many batches have been processed and how many remain
+    - To get session information and next steps
+    - To verify session is still active before continuing
+    
+    **RETURNS:**
+    - Current batch processing progress
+    - Session creation time and last activity
+    - Number of successful and failed batches
+    - Total findings discovered so far
+    - Available next actions
+    
+    **USEFUL FOR:**
+    - Progress monitoring during large audits
+    - Debugging session issues
+    - Planning next steps in audit workflow
+    """
+    start_time_perf = timer()
+    logger.debug(f'Starting get_batch_status for session {batch_session_id}')
+    
+    try:
+        # Clean up expired sessions first
+        cleanup_expired_sessions()
+        
+        result = await get_batch_session_status(batch_session_id)
+        
+        elapsed = timer() - start_time_perf
+        logger.debug(f'get_batch_status completed in {elapsed:.3f}s')
+        return result
+        
+    except Exception as e:
+        logger.error(f'Unexpected error in get_batch_status: {e}', exc_info=True)
         return f'Error: {str(e)}'
 
 

@@ -170,12 +170,17 @@ def process_next_batch(session_id: str, appsignals_client) -> Dict[str, Any]:
             'status': 'success',
         }
 
-    except Exception as e:
-        # Create error result
-        batch_result = {**batch_metadata, 'error': str(e), 'status': 'failed'}
+        # Only update session state on success
+        _update_session_after_batch(session, batch_result)
 
-    # Update session state and return result
-    _update_session_after_batch(session, batch_result)
+    except Exception as e:
+        # Create error result but DON'T update session state
+        # This allows the same batch to be retried on next call
+        batch_result = {**batch_metadata, 'error': str(e), 'status': 'failed'}
+        logger.warning(
+            f'Batch {batch_metadata["batch_index"]} failed: {str(e)}. Will retry on next call.'
+        )
+
     return batch_result
 
 

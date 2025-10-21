@@ -407,7 +407,7 @@ class TestProcessNextBatch:
         assert session['status'] == 'completed'
 
     def test_process_next_batch_api_error(self, sample_targets, sample_input_obj):
-        """Test batch processing with API error."""
+        """Test batch processing with API error - batch index should NOT advance for retry."""
         mock_client = MagicMock()
         mock_client.list_audit_findings.side_effect = Exception('API error')
 
@@ -424,10 +424,13 @@ class TestProcessNextBatch:
         assert result['error'] == 'API error'
         assert result['batch_index'] == 1
 
-        # Verify session was updated
+        # Verify session was NOT updated (for retry capability)
         session = get_batch_session(session_id)
         assert session is not None
-        assert len(session['failed_batches']) == 1
+        assert session['current_batch_index'] == 0  # Should NOT advance on failure
+        assert len(session['failed_batches']) == 0  # Should NOT be added to failed_batches
+        assert len(session['processed_batches']) == 0
+        assert session['status'] == 'created'  # Should remain in original status
 
     def test_process_next_batch_session_not_found(self, mock_appsignals_client):
         """Test batch processing with non-existent session."""
@@ -486,6 +489,171 @@ class TestProcessNextBatch:
         assert session is not None
         assert session['current_batch_index'] == 2
         assert session['status'] == 'in_progress'
+
+    def test_process_next_batch_retry_after_failure(self, sample_targets, sample_input_obj):
+        """Test that failed batches can be retried by calling process_next_batch again."""
+        # Mock client that fails first, then succeeds
+        mock_client = MagicMock()
+        mock_client.list_audit_findings.side_effect = [
+            Exception('Network timeout'),  # First call fails
+            {'AuditFindings': [{'FindingId': 'finding-1'}]},  # Second call succeeds
+        ]
+
+        session_id = create_batch_session(
+            targets=sample_targets[:3],
+            input_obj=sample_input_obj,
+            region='us-east-1',
+            banner='Retry Test',
+        )
+
+        # First attempt - should fail
+        result1 = process_next_batch(session_id, mock_client)
+        assert result1['status'] == 'failed'
+        assert result1['error'] == 'Network timeout'
+        assert result1['batch_index'] == 1
+
+        # Verify session state unchanged (ready for retry)
+        session = get_batch_session(session_id)
+        assert session is not None
+        assert session['current_batch_index'] == 0  # Still at first batch
+        assert session['status'] == 'created'  # Status unchanged
+        assert len(session['failed_batches']) == 0  # No failed batches recorded
+        assert len(session['processed_batches']) == 0
+
+        # Second attempt - should succeed (retry same batch)
+        result2 = process_next_batch(session_id, mock_client)
+        assert result2['status'] == 'success'
+        assert result2['batch_index'] == 1  # Same batch index
+        assert result2['findings_count'] == 1
+
+        # Verify session state updated after success
+        session = get_batch_session(session_id)
+        assert session is not None
+        assert session['current_batch_index'] == 1  # Now advanced
+        assert session['status'] == 'completed'  # Single batch completed
+        assert len(session['processed_batches']) == 1  # Success recorded
+        assert len(session['failed_batches']) == 0  # No failures recorded
+
+    def test_process_next_batch_multiple_retry_attempts(self, sample_targets, sample_input_obj):
+        """Test multiple retry attempts for the same batch."""
+        # Mock client that fails multiple times, then succeeds
+        mock_client = MagicMock()
+        mock_client.list_audit_findings.side_effect = [
+            Exception('Connection timeout'),  # Attempt 1: fail
+            Exception('Rate limit exceeded'),  # Attempt 2: fail
+            Exception('Service unavailable'),  # Attempt 3: fail
+            {'AuditFindings': []},  # Attempt 4: succeed
+        ]
+
+        session_id = create_batch_session(
+            targets=sample_targets[:3],
+            input_obj=sample_input_obj,
+            region='us-east-1',
+            banner='Multiple Retry Test',
+        )
+
+        # Attempt 1: Connection timeout
+        result1 = process_next_batch(session_id, mock_client)
+        assert result1['status'] == 'failed'
+        assert result1['error'] == 'Connection timeout'
+        assert result1['batch_index'] == 1
+
+        session = get_batch_session(session_id)
+        assert session['current_batch_index'] == 0  # No advancement
+
+        # Attempt 2: Rate limit
+        result2 = process_next_batch(session_id, mock_client)
+        assert result2['status'] == 'failed'
+        assert result2['error'] == 'Rate limit exceeded'
+        assert result2['batch_index'] == 1  # Same batch
+
+        session = get_batch_session(session_id)
+        assert session['current_batch_index'] == 0  # Still no advancement
+
+        # Attempt 3: Service unavailable
+        result3 = process_next_batch(session_id, mock_client)
+        assert result3['status'] == 'failed'
+        assert result3['error'] == 'Service unavailable'
+        assert result3['batch_index'] == 1  # Same batch
+
+        session = get_batch_session(session_id)
+        assert session['current_batch_index'] == 0  # Still no advancement
+
+        # Attempt 4: Success
+        result4 = process_next_batch(session_id, mock_client)
+        assert result4['status'] == 'success'
+        assert result4['batch_index'] == 1  # Same batch
+        assert result4['findings_count'] == 0
+
+        # Verify final session state
+        session = get_batch_session(session_id)
+        assert session is not None
+        assert session['current_batch_index'] == 1  # Finally advanced
+        assert session['status'] == 'completed'
+        assert len(session['processed_batches']) == 1
+        assert len(session['failed_batches']) == 0  # No failures recorded in session
+
+    def test_process_next_batch_retry_in_multi_batch_session(
+        self, sample_targets, sample_input_obj
+    ):
+        """Test retry behavior in a multi-batch session."""
+        # Mock client: batch 1 succeeds, batch 2 fails then succeeds, batch 3 succeeds
+        mock_client = MagicMock()
+        mock_client.list_audit_findings.side_effect = [
+            {'AuditFindings': [{'FindingId': 'batch1-finding'}]},  # Batch 1: success
+            Exception('Temporary failure'),  # Batch 2: fail
+            {'AuditFindings': [{'FindingId': 'batch2-finding'}]},  # Batch 2 retry: success
+            {'AuditFindings': []},  # Batch 3: success
+        ]
+
+        session_id = create_batch_session(
+            targets=sample_targets[:9],  # 9 targets = 3 batches of 3
+            input_obj=sample_input_obj,
+            region='us-east-1',
+            banner='Multi-batch Retry Test',
+            batch_size=3,
+        )
+
+        # Process batch 1 (success)
+        result1 = process_next_batch(session_id, mock_client)
+        assert result1['status'] == 'success'
+        assert result1['batch_index'] == 1
+        assert result1['findings_count'] == 1
+
+        session = get_batch_session(session_id)
+        assert session['current_batch_index'] == 1  # Advanced to batch 2
+
+        # Process batch 2 (failure)
+        result2 = process_next_batch(session_id, mock_client)
+        assert result2['status'] == 'failed'
+        assert result2['error'] == 'Temporary failure'
+        assert result2['batch_index'] == 2
+
+        session = get_batch_session(session_id)
+        assert session['current_batch_index'] == 1  # Still at batch 2 (no advancement)
+
+        # Retry batch 2 (success)
+        result3 = process_next_batch(session_id, mock_client)
+        assert result3['status'] == 'success'
+        assert result3['batch_index'] == 2  # Same batch index
+        assert result3['findings_count'] == 1
+
+        session = get_batch_session(session_id)
+        assert session['current_batch_index'] == 2  # Now advanced to batch 3
+
+        # Process batch 3 (success)
+        result4 = process_next_batch(session_id, mock_client)
+        assert result4['status'] == 'success'
+        assert result4['batch_index'] == 3
+        assert result4['findings_count'] == 0
+
+        # Verify final session state
+        session = get_batch_session(session_id)
+        assert session is not None
+        assert session['status'] == 'completed'
+        assert len(session['processed_batches']) == 3  # All batches successful
+        assert len(session['failed_batches']) == 0  # No failures recorded
+        assert len(session['all_findings']) == 2  # Findings from batch 1 and 2
 
 
 class TestCleanupBatchSessions:
@@ -723,14 +891,15 @@ class TestIntegration:
         assert 'error' in result4
         assert 'No more batches to process' in result4['error']
 
-    def test_batch_processing_with_mixed_results(self, sample_targets, sample_input_obj):
-        """Test batch processing with mixed success and failure results."""
-        # Mock client that fails on second call
+    def test_batch_processing_with_mixed_results_and_retry(self, sample_targets, sample_input_obj):
+        """Test batch processing with mixed success and failure results, including retry behavior."""
+        # Mock client: batch 1 succeeds, batch 2 fails then succeeds on retry, batch 3 succeeds
         mock_client = MagicMock()
         mock_client.list_audit_findings.side_effect = [
-            {'AuditFindings': [{'FindingId': 'finding-1'}]},  # Success
-            Exception('Network error'),  # Failure
-            {'AuditFindings': []},  # Success with no findings
+            {'AuditFindings': [{'FindingId': 'finding-1'}]},  # Batch 1: success
+            Exception('Network error'),  # Batch 2: failure
+            {'AuditFindings': [{'FindingId': 'finding-2'}]},  # Batch 2 retry: success
+            {'AuditFindings': []},  # Batch 3: success with no findings
         ]
 
         session_id = create_batch_session(
@@ -746,23 +915,41 @@ class TestIntegration:
         assert result1['status'] == 'success'
         assert result1['findings_count'] == 1
 
-        # Process second batch (failure)
+        session = get_batch_session(session_id)
+        assert session['current_batch_index'] == 1  # Advanced to batch 2
+
+        # Process second batch (failure - should NOT advance)
         result2 = process_next_batch(session_id, mock_client)
         assert result2['status'] == 'failed'
         assert result2['error'] == 'Network error'
+        assert result2['batch_index'] == 2
 
-        # Process third batch (success, no findings)
+        session = get_batch_session(session_id)
+        assert session['current_batch_index'] == 1  # Should NOT advance on failure
+        assert len(session['failed_batches']) == 0  # Should NOT be recorded as failed
+
+        # Retry second batch (success - should advance)
         result3 = process_next_batch(session_id, mock_client)
         assert result3['status'] == 'success'
-        assert result3['findings_count'] == 0
+        assert result3['batch_index'] == 2  # Same batch index
+        assert result3['findings_count'] == 1
+
+        session = get_batch_session(session_id)
+        assert session['current_batch_index'] == 2  # Now advanced to batch 3
+
+        # Process third batch (success, no findings)
+        result4 = process_next_batch(session_id, mock_client)
+        assert result4['status'] == 'success'
+        assert result4['batch_index'] == 3
+        assert result4['findings_count'] == 0
 
         # Verify final session state
         session = get_batch_session(session_id)
         assert session is not None
         assert session['status'] == 'completed'
-        assert len(session['processed_batches']) == 2  # 2 successful batches
-        assert len(session['failed_batches']) == 1  # 1 failed batch
-        assert len(session['all_findings']) == 1  # Only findings from successful batches
+        assert len(session['processed_batches']) == 3  # All 3 batches successful (after retry)
+        assert len(session['failed_batches']) == 0  # No failed batches recorded (retry succeeded)
+        assert len(session['all_findings']) == 2  # Findings from batch 1 and 2
 
     @patch('awslabs.cloudwatch_appsignals_mcp_server.batch_processing_utils.logger')
     def test_logging_during_batch_processing(self, mock_logger, sample_targets, sample_input_obj):

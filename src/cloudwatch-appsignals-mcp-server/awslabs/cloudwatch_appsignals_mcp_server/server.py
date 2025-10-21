@@ -40,7 +40,6 @@ from .batch_processing_utils import (
     process_next_batch,
 )
 from .batch_tools import (
-    cleanup_audit_sessions,
     continue_audit_batch,
 )
 from .canary_utils import (
@@ -74,6 +73,9 @@ from typing import Optional
 
 # Constants
 BATCH_SIZE_THRESHOLD = 5
+# NOTE: list_audit_findings API has a maximum limit of 10 results per call by default.
+# The max value is set to 10 due to API limitations and to
+# reduce MCP server latency for interactive auditing workflows.
 AUDIT_SERVICE_BATCH_SIZE_THRESHOLD = 10
 
 RUN_STATES = {'RUNNING': 'RUNNING', 'PASSED': 'PASSED', 'FAILED': 'FAILED'}
@@ -328,7 +330,6 @@ async def audit_services(
     5. **If continuing:** `continue_audit_batch(session_id)` → Process next batch
     6. **Repeat:** Continue batch processing cycle with user choice at each step when findings exist
     7. **Conclude:** When all services processed, summarize audit results from all batches
-    8. **Cleanup:** After completing full audit, call `cleanup_audit_sessions()` to free memory resources
     """
     start_time_perf = timer()
     logger.debug('Starting audit_services (PRIMARY SERVICE AUDIT TOOL)')
@@ -1408,7 +1409,6 @@ mcp.tool()(analyze_canary_failures)
 
 # Register batch processing tools
 mcp.tool()(continue_audit_batch)
-mcp.tool()(cleanup_audit_sessions)
 
 
 def main():

@@ -607,7 +607,6 @@ analyze_canary_failures(canary_name="webapp-erorrpagecanary")
    - **Auto-continue** to next batch with `continue_audit_batch(session_id)`
 5. **Repeat** batch processing cycle with user choice at each step when findings exist
 6. **When all services processed** - Summarize audit results from all batches
-7. **Cleanup after completion** - Call `cleanup_audit_sessions()` to free memory resources
 
 #### **For Small Service Lists (≤10 services) - Direct Processing:**
 1. **Start with `audit_services()`** - Processes all services immediately
@@ -618,7 +617,6 @@ analyze_canary_failures(canary_name="webapp-erorrpagecanary")
 
 #### **Available Batch Management Tools:**
 - **`continue_audit_batch(session_id)`** - Continue to next batch in active session
-- **`cleanup_audit_sessions()`** - Clean up all batch sessions and free memory
 
 ### 🔍 SLO Investigation Workflow
 1. **Use `get_slo()`** - Understand SLO configuration and thresholds

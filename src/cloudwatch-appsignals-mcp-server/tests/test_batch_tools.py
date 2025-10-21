@@ -2,7 +2,6 @@
 
 import pytest
 from awslabs.cloudwatch_appsignals_mcp_server.batch_tools import (
-    cleanup_audit_sessions,
     continue_audit_batch,
 )
 from unittest.mock import patch
@@ -317,45 +316,6 @@ class TestContinueAuditBatch:
         assert result == 'Error: AWS API throttling error'
 
 
-class TestCleanupAuditSessions:
-    """Test cleanup_audit_sessions function."""
-
-    @pytest.mark.asyncio
-    async def test_cleanup_audit_sessions_success(self, mock_batch_processing_utils):
-        """Test successful cleanup of audit sessions."""
-        result = await cleanup_audit_sessions()
-
-        mock_batch_processing_utils['cleanup_batch_sessions'].assert_called_once()
-        assert result == 'All batch sessions cleaned up successfully.'
-
-    @pytest.mark.asyncio
-    async def test_cleanup_audit_sessions_exception(self, mock_batch_processing_utils):
-        """Test cleanup with exception."""
-        # Mock exception during cleanup
-        mock_batch_processing_utils['cleanup_batch_sessions'].side_effect = Exception(
-            'Cleanup failed'
-        )
-
-        result = await cleanup_audit_sessions()
-
-        assert result == 'Error: Cleanup failed'
-        mock_batch_processing_utils['cleanup_batch_sessions'].assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_cleanup_audit_sessions_multiple_calls(self, mock_batch_processing_utils):
-        """Test multiple cleanup calls."""
-        # First cleanup
-        result1 = await cleanup_audit_sessions()
-        assert result1 == 'All batch sessions cleaned up successfully.'
-
-        # Second cleanup (should also succeed)
-        result2 = await cleanup_audit_sessions()
-        assert result2 == 'All batch sessions cleaned up successfully.'
-
-        # Verify cleanup was called twice
-        assert mock_batch_processing_utils['cleanup_batch_sessions'].call_count == 2
-
-
 class TestIntegration:
     """Integration tests for batch tools workflow."""
 
@@ -435,47 +395,6 @@ class TestIntegration:
         assert mock_batch_processing_utils['format_batch_result'].call_count == 3
 
     @pytest.mark.asyncio
-    async def test_batch_continuation_then_cleanup(
-        self, mock_batch_processing_utils, mock_appsignals_client
-    ):
-        """Test batch continuation followed by cleanup."""
-        session_id = 'test-session-cleanup'
-
-        # Mock final batch processing
-        batch_result = {
-            'batch_index': 1,
-            'total_batches': 1,
-            'targets_in_batch': 3,
-            'findings_count': 0,
-            'findings': [],
-            'status': 'success',
-        }
-
-        session = {
-            'session_id': session_id,
-            'status': 'completed',
-            'current_batch_index': 1,
-        }
-
-        mock_batch_processing_utils['process_next_batch'].return_value = batch_result
-        mock_batch_processing_utils['get_batch_session'].return_value = session
-        mock_batch_processing_utils[
-            'format_batch_result'
-        ].return_value = '✅ Batch 1/1: 3 services healthy'
-
-        # Continue batch processing
-        continue_result = await continue_audit_batch(session_id)
-        assert '✅ Batch 1/1: 3 services healthy' in continue_result
-
-        # Clean up sessions
-        cleanup_result = await cleanup_audit_sessions()
-        assert cleanup_result == 'All batch sessions cleaned up successfully.'
-
-        # Verify both operations were called
-        mock_batch_processing_utils['process_next_batch'].assert_called_once()
-        mock_batch_processing_utils['cleanup_batch_sessions'].assert_called_once()
-
-    @pytest.mark.asyncio
     async def test_error_handling_in_workflow(
         self, mock_batch_processing_utils, mock_appsignals_client
     ):
@@ -489,15 +408,6 @@ class TestIntegration:
 
         continue_result = await continue_audit_batch(session_id)
         assert continue_result == 'Error: Processing error'
-
-        # Reset mock and test cleanup error handling
-        mock_batch_processing_utils['process_next_batch'].reset_mock()
-        mock_batch_processing_utils['cleanup_batch_sessions'].side_effect = Exception(
-            'Cleanup error'
-        )
-
-        cleanup_result = await cleanup_audit_sessions()
-        assert cleanup_result == 'Error: Cleanup error'
 
 
 class TestParameterValidation:

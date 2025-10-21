@@ -16,7 +16,6 @@
 
 from .aws_clients import appsignals_client
 from .batch_processing_utils import (
-    cleanup_batch_sessions,
     format_batch_result,
     get_batch_session,
     process_next_batch,
@@ -62,23 +61,4 @@ async def continue_audit_batch(
 
     except Exception as e:
         logger.error(f'Error in continue_audit_batch: {e}', exc_info=True)
-        return f'Error: {str(e)}'
-
-
-async def cleanup_audit_sessions() -> str:
-    """Clean up all batch audit sessions from memory.
-
-    **BATCH SESSION CLEANUP TOOL**
-    Use this tool to free memory by cleaning up all completed batch audit sessions.
-
-    **WHEN TO USE:**
-    - After completing a full service audit to free memory
-    - To clean up all sessions and free memory resources
-    """
-    try:
-        cleanup_batch_sessions()
-        return 'All batch sessions cleaned up successfully.'
-
-    except Exception as e:
-        logger.error(f'Error in cleanup_audit_sessions: {e}', exc_info=True)
         return f'Error: {str(e)}'

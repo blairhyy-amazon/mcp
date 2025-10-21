@@ -273,7 +273,7 @@ class TestExpandServiceWildcardPatterns:
         """Test expanding wildcard for all services."""
         targets = [{'Type': 'service', 'Data': {'Service': {'Type': 'Service', 'Name': '*'}}}]
 
-        result = expand_service_wildcard_patterns(
+        result, filtering_stats = expand_service_wildcard_patterns(
             targets, 1640995200, 1641081600, mock_appsignals_client
         )
 
@@ -283,13 +283,18 @@ class TestExpandServiceWildcardPatterns:
         assert 'user-service' in service_names
         assert 'payment-gateway' in service_names
 
+        # Check filtering stats
+        assert filtering_stats['total_services'] == 3
+        assert filtering_stats['instrumented_services'] == 3
+        assert filtering_stats['filtered_out'] == 0
+
     def test_expand_service_wildcard_pattern_match(self, mock_appsignals_client):
         """Test expanding wildcard with pattern matching."""
         targets = [
             {'Type': 'service', 'Data': {'Service': {'Type': 'Service', 'Name': '*payment*'}}}
         ]
 
-        result = expand_service_wildcard_patterns(
+        result, filtering_stats = expand_service_wildcard_patterns(
             targets, 1640995200, 1641081600, mock_appsignals_client
         )
 
@@ -299,24 +304,34 @@ class TestExpandServiceWildcardPatterns:
         assert 'payment-gateway' in service_names
         assert 'user-service' not in service_names
 
+        # Check filtering stats - shows all services from API call, not just pattern matches
+        assert filtering_stats['total_services'] == 3
+        assert filtering_stats['instrumented_services'] == 3
+        assert filtering_stats['filtered_out'] == 0
+
     def test_expand_service_no_wildcard(self, mock_appsignals_client):
         """Test with no wildcard patterns."""
         targets = [
             {'Type': 'service', 'Data': {'Service': {'Type': 'Service', 'Name': 'exact-service'}}}
         ]
 
-        result = expand_service_wildcard_patterns(
+        result, filtering_stats = expand_service_wildcard_patterns(
             targets, 1640995200, 1641081600, mock_appsignals_client
         )
 
         assert len(result) == 1
         assert result[0]['Data']['Service']['Name'] == 'exact-service'
 
+        # Check filtering stats - fuzzy matching still calls API and calculates stats
+        assert filtering_stats['total_services'] == 3
+        assert filtering_stats['instrumented_services'] == 3
+        assert filtering_stats['filtered_out'] == 0
+
     def test_expand_service_shorthand_format(self, mock_appsignals_client):
         """Test expanding with shorthand service format."""
         targets = [{'Type': 'service', 'Service': '*payment*'}]
 
-        result = expand_service_wildcard_patterns(
+        result, filtering_stats = expand_service_wildcard_patterns(
             targets, 1640995200, 1641081600, mock_appsignals_client
         )
 
@@ -324,6 +339,11 @@ class TestExpandServiceWildcardPatterns:
         service_names = [t['Data']['Service']['Name'] for t in result]
         assert 'payment-service' in service_names
         assert 'payment-gateway' in service_names
+
+        # Check filtering stats - shows all services from API call, not just pattern matches
+        assert filtering_stats['total_services'] == 3
+        assert filtering_stats['instrumented_services'] == 3
+        assert filtering_stats['filtered_out'] == 0
 
     def test_expand_service_api_error(self, mock_appsignals_client):
         """Test handling API errors during expansion."""
@@ -340,12 +360,17 @@ class TestExpandServiceWildcardPatterns:
         """Test that non-service targets pass through unchanged."""
         targets = [{'Type': 'slo', 'Data': {'Slo': {'SloName': 'test-slo'}}}]
 
-        result = expand_service_wildcard_patterns(
+        result, filtering_stats = expand_service_wildcard_patterns(
             targets, 1640995200, 1641081600, mock_appsignals_client
         )
 
         assert len(result) == 1
         assert result[0]['Type'] == 'slo'
+
+        # Check filtering stats - no service targets means no filtering occurred
+        assert filtering_stats['total_services'] == 0
+        assert filtering_stats['instrumented_services'] == 0
+        assert filtering_stats['filtered_out'] == 0
 
     @patch('awslabs.cloudwatch_appsignals_mcp_server.utils.calculate_name_similarity')
     def test_expand_service_fuzzy_matching(self, mock_similarity, mock_appsignals_client):

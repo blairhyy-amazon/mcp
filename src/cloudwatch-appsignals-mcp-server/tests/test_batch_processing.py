@@ -17,7 +17,7 @@ def mock_appsignals_client():
 @pytest.mark.asyncio
 async def test_audit_services_batch_processing_success(mock_appsignals_client):
     """Test audit_services triggers batch processing for large target lists."""
-    # Create 12 targets to exceed AUDIT_SERVICE_BATCH_SIZE_THRESHOLD (10)
+    # Create 12 targets to exceed AUDIT_SERVICE_BATCH_SIZE_THRESHOLD (5)
     service_targets = json.dumps(
         [
             {
@@ -54,7 +54,7 @@ async def test_audit_services_batch_processing_success(mock_appsignals_client):
         )
 
         # Verify batch processing was triggered
-        assert '📦 Batching: Processing 12 targets in batches of 10' in result
+        assert '📦 Batching: Processing 12 targets in batches of 5' in result
 
 
 @pytest.mark.asyncio

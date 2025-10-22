@@ -3,10 +3,11 @@
 import pytest
 import uuid
 from awslabs.cloudwatch_appsignals_mcp_server.batch_processing_utils import (
+    _batch_sessions,
     _build_api_input,
+    _cleanup_excess_sessions,
     _create_batch_metadata,
     _update_session_after_batch,
-    cleanup_batch_sessions,
     create_batch_session,
     format_batch_result,
     get_batch_session,
@@ -559,6 +560,7 @@ class TestProcessNextBatch:
         assert result1['batch_index'] == 1
 
         session = get_batch_session(session_id)
+        assert session is not None
         assert session['current_batch_index'] == 0  # No advancement
 
         # Attempt 2: Rate limit
@@ -568,6 +570,7 @@ class TestProcessNextBatch:
         assert result2['batch_index'] == 1  # Same batch
 
         session = get_batch_session(session_id)
+        assert session is not None
         assert session['current_batch_index'] == 0  # Still no advancement
 
         # Attempt 3: Service unavailable
@@ -577,6 +580,7 @@ class TestProcessNextBatch:
         assert result3['batch_index'] == 1  # Same batch
 
         session = get_batch_session(session_id)
+        assert session is not None
         assert session['current_batch_index'] == 0  # Still no advancement
 
         # Attempt 4: Success
@@ -621,6 +625,7 @@ class TestProcessNextBatch:
         assert result1['findings_count'] == 1
 
         session = get_batch_session(session_id)
+        assert session is not None
         assert session['current_batch_index'] == 1  # Advanced to batch 2
 
         # Process batch 2 (failure)
@@ -630,6 +635,7 @@ class TestProcessNextBatch:
         assert result2['batch_index'] == 2
 
         session = get_batch_session(session_id)
+        assert session is not None
         assert session['current_batch_index'] == 1  # Still at batch 2 (no advancement)
 
         # Retry batch 2 (success)
@@ -639,6 +645,7 @@ class TestProcessNextBatch:
         assert result3['findings_count'] == 1
 
         session = get_batch_session(session_id)
+        assert session is not None
         assert session['current_batch_index'] == 2  # Now advanced to batch 3
 
         # Process batch 3 (success)
@@ -654,43 +661,6 @@ class TestProcessNextBatch:
         assert len(session['processed_batches']) == 3  # All batches successful
         assert len(session['failed_batches']) == 0  # No failures recorded
         assert len(session['all_findings']) == 2  # Findings from batch 1 and 2
-
-
-class TestCleanupBatchSessions:
-    """Test cleanup_batch_sessions function."""
-
-    def test_cleanup_batch_sessions(self, sample_targets, sample_input_obj):
-        """Test cleaning up all batch sessions."""
-        # Create multiple sessions
-        session_id1 = create_batch_session(
-            targets=sample_targets[:3],
-            input_obj=sample_input_obj,
-            region='us-east-1',
-            banner='Test Banner 1',
-        )
-
-        session_id2 = create_batch_session(
-            targets=sample_targets[:5],
-            input_obj=sample_input_obj,
-            region='us-east-1',
-            banner='Test Banner 2',
-        )
-
-        # Verify sessions exist
-        assert get_batch_session(session_id1) is not None
-        assert get_batch_session(session_id2) is not None
-
-        # Clean up all sessions
-        cleanup_batch_sessions()
-
-        # Verify sessions are gone
-        assert get_batch_session(session_id1) is None
-        assert get_batch_session(session_id2) is None
-
-    def test_cleanup_batch_sessions_empty(self):
-        """Test cleaning up when no sessions exist."""
-        # Should not raise an exception
-        cleanup_batch_sessions()
 
 
 class TestFormatBatchResult:
@@ -916,6 +886,7 @@ class TestIntegration:
         assert result1['findings_count'] == 1
 
         session = get_batch_session(session_id)
+        assert session is not None
         assert session['current_batch_index'] == 1  # Advanced to batch 2
 
         # Process second batch (failure - should NOT advance)
@@ -925,6 +896,7 @@ class TestIntegration:
         assert result2['batch_index'] == 2
 
         session = get_batch_session(session_id)
+        assert session is not None
         assert session['current_batch_index'] == 1  # Should NOT advance on failure
         assert len(session['failed_batches']) == 0  # Should NOT be recorded as failed
 
@@ -935,6 +907,7 @@ class TestIntegration:
         assert result3['findings_count'] == 1
 
         session = get_batch_session(session_id)
+        assert session is not None
         assert session['current_batch_index'] == 2  # Now advanced to batch 3
 
         # Process third batch (success, no findings)
@@ -954,8 +927,6 @@ class TestIntegration:
     @patch('awslabs.cloudwatch_appsignals_mcp_server.batch_processing_utils.logger')
     def test_logging_during_batch_processing(self, mock_logger, sample_targets, sample_input_obj):
         """Test that appropriate logging occurs during batch processing."""
-        # Clean up any existing sessions first
-        cleanup_batch_sessions()
         mock_logger.reset_mock()
 
         session_id = create_batch_session(
@@ -965,9 +936,385 @@ class TestIntegration:
             banner='Logging Test',
         )
 
-        # Verify session creation was logged
-        mock_logger.info.assert_called_with(f'Created batch session {session_id} with 1 batches')
+        # Verify session creation was logged (may also have cleanup logs)
+        session_creation_calls = [
+            call
+            for call in mock_logger.info.call_args_list
+            if f'Created batch session {session_id}' in str(call)
+        ]
+        assert len(session_creation_calls) == 1
+        assert f'Created batch session {session_id} with 1 batches' in str(
+            session_creation_calls[0]
+        )
 
-        # Clean up and verify cleanup was logged
-        cleanup_batch_sessions()
-        mock_logger.info.assert_called_with('Cleaned up all 1 batch sessions')
+
+class TestCleanupExcessSessions:
+    """Test _cleanup_excess_sessions function."""
+
+    def setup_method(self):
+        """Clear batch sessions before each test."""
+        global _batch_sessions
+        _batch_sessions.clear()
+
+    def teardown_method(self):
+        """Clear batch sessions after each test."""
+        global _batch_sessions
+        _batch_sessions.clear()
+
+    def test_cleanup_excess_sessions_no_cleanup_needed(self):
+        """Test cleanup when sessions are within limit."""
+        global _batch_sessions
+
+        # Create sessions within limit (MAX_BATCH_SESSIONS = 1)
+        session_data = {
+            'session_id': 'test-session-1',
+            'created_at': '2024-01-01T10:00:00+00:00',
+            'status': 'created',
+        }
+        _batch_sessions['test-session-1'] = session_data
+
+        # Should not remove any sessions
+        with patch(
+            'awslabs.cloudwatch_appsignals_mcp_server.batch_processing_utils.logger'
+        ) as mock_logger:
+            _cleanup_excess_sessions()
+
+            # Verify no logging occurred (no cleanup needed)
+            mock_logger.info.assert_not_called()
+
+        # Verify session still exists
+        assert len(_batch_sessions) == 1
+        assert 'test-session-1' in _batch_sessions
+
+    def test_cleanup_excess_sessions_at_limit(self):
+        """Test cleanup when sessions are exactly at limit."""
+        global _batch_sessions
+
+        # Create exactly MAX_BATCH_SESSIONS (1) sessions
+        session_data = {
+            'session_id': 'test-session-1',
+            'created_at': '2024-01-01T10:00:00+00:00',
+            'status': 'created',
+        }
+        _batch_sessions['test-session-1'] = session_data
+
+        with patch(
+            'awslabs.cloudwatch_appsignals_mcp_server.batch_processing_utils.logger'
+        ) as mock_logger:
+            _cleanup_excess_sessions()
+
+            # Verify no logging occurred (at limit, no cleanup needed)
+            mock_logger.info.assert_not_called()
+
+        # Verify session still exists
+        assert len(_batch_sessions) == 1
+        assert 'test-session-1' in _batch_sessions
+
+    def test_cleanup_excess_sessions_cleanup_needed(self):
+        """Test cleanup when sessions exceed limit."""
+        global _batch_sessions
+
+        # Create sessions exceeding limit (MAX_BATCH_SESSIONS = 1)
+        # Older session (should be removed)
+        older_session = {
+            'session_id': 'old-session',
+            'created_at': '2024-01-01T09:00:00+00:00',
+            'status': 'created',
+        }
+        # Newer session (should be kept)
+        newer_session = {
+            'session_id': 'new-session',
+            'created_at': '2024-01-01T11:00:00+00:00',
+            'status': 'created',
+        }
+
+        _batch_sessions['old-session'] = older_session
+        _batch_sessions['new-session'] = newer_session
+
+        with patch(
+            'awslabs.cloudwatch_appsignals_mcp_server.batch_processing_utils.logger'
+        ) as mock_logger:
+            _cleanup_excess_sessions()
+
+            # Verify cleanup was logged
+            mock_logger.info.assert_called_once_with('Cleaned up 1 excess batch sessions')
+
+        # Verify only newer session remains
+        assert len(_batch_sessions) == 1
+        assert 'new-session' in _batch_sessions
+        assert 'old-session' not in _batch_sessions
+
+    def test_cleanup_excess_sessions_multiple_excess(self):
+        """Test cleanup when multiple sessions exceed limit."""
+        global _batch_sessions
+
+        # Create multiple sessions exceeding limit (MAX_BATCH_SESSIONS = 1)
+        sessions = [
+            ('oldest-session', '2024-01-01T08:00:00+00:00'),
+            ('old-session', '2024-01-01T09:00:00+00:00'),
+            ('newer-session', '2024-01-01T10:00:00+00:00'),
+            ('newest-session', '2024-01-01T11:00:00+00:00'),
+        ]
+
+        for session_id, created_at in sessions:
+            _batch_sessions[session_id] = {
+                'session_id': session_id,
+                'created_at': created_at,
+                'status': 'created',
+            }
+
+        with patch(
+            'awslabs.cloudwatch_appsignals_mcp_server.batch_processing_utils.logger'
+        ) as mock_logger:
+            _cleanup_excess_sessions()
+
+            # Verify cleanup was logged (4 sessions - 1 limit = 3 excess)
+            mock_logger.info.assert_called_once_with('Cleaned up 3 excess batch sessions')
+
+        # Verify only newest session remains
+        assert len(_batch_sessions) == 1
+        assert 'newest-session' in _batch_sessions
+        assert 'oldest-session' not in _batch_sessions
+        assert 'old-session' not in _batch_sessions
+        assert 'newer-session' not in _batch_sessions
+
+    def test_cleanup_excess_sessions_missing_created_at(self):
+        """Test cleanup when some sessions are missing created_at field."""
+        global _batch_sessions
+
+        # Create sessions with and without created_at
+        session_with_time = {
+            'session_id': 'session-with-time',
+            'created_at': '2024-01-01T10:00:00+00:00',
+            'status': 'created',
+        }
+        session_without_time = {
+            'session_id': 'session-without-time',
+            'status': 'created',
+            # Missing 'created_at' field
+        }
+
+        _batch_sessions['session-with-time'] = session_with_time
+        _batch_sessions['session-without-time'] = session_without_time
+
+        with patch(
+            'awslabs.cloudwatch_appsignals_mcp_server.batch_processing_utils.logger'
+        ) as mock_logger:
+            _cleanup_excess_sessions()
+
+            # Verify cleanup was logged (2 sessions - 1 limit = 1 excess)
+            mock_logger.info.assert_called_once_with('Cleaned up 1 excess batch sessions')
+
+        # Verify one session remains (the one with created_at should be kept as it sorts later)
+        assert len(_batch_sessions) == 1
+        # Session without created_at gets empty string and sorts first (gets removed)
+        assert 'session-with-time' in _batch_sessions
+        assert 'session-without-time' not in _batch_sessions
+
+    def test_cleanup_excess_sessions_empty_created_at(self):
+        """Test cleanup when sessions have empty created_at field."""
+        global _batch_sessions
+
+        # Create sessions with empty and valid created_at
+        session_with_empty_time = {
+            'session_id': 'session-empty-time',
+            'created_at': '',
+            'status': 'created',
+        }
+        session_with_time = {
+            'session_id': 'session-with-time',
+            'created_at': '2024-01-01T10:00:00+00:00',
+            'status': 'created',
+        }
+
+        _batch_sessions['session-empty-time'] = session_with_empty_time
+        _batch_sessions['session-with-time'] = session_with_time
+
+        with patch(
+            'awslabs.cloudwatch_appsignals_mcp_server.batch_processing_utils.logger'
+        ) as mock_logger:
+            _cleanup_excess_sessions()
+
+            # Verify cleanup was logged
+            mock_logger.info.assert_called_once_with('Cleaned up 1 excess batch sessions')
+
+        # Verify session with valid timestamp remains (empty string sorts first)
+        assert len(_batch_sessions) == 1
+        assert 'session-with-time' in _batch_sessions
+        assert 'session-empty-time' not in _batch_sessions
+
+    def test_cleanup_excess_sessions_same_timestamps(self):
+        """Test cleanup when sessions have identical timestamps."""
+        global _batch_sessions
+
+        # Create sessions with identical timestamps
+        same_time = '2024-01-01T10:00:00+00:00'
+        session1 = {
+            'session_id': 'session-1',
+            'created_at': same_time,
+            'status': 'created',
+        }
+        session2 = {
+            'session_id': 'session-2',
+            'created_at': same_time,
+            'status': 'created',
+        }
+
+        _batch_sessions['session-1'] = session1
+        _batch_sessions['session-2'] = session2
+
+        with patch(
+            'awslabs.cloudwatch_appsignals_mcp_server.batch_processing_utils.logger'
+        ) as mock_logger:
+            _cleanup_excess_sessions()
+
+            # Verify cleanup was logged
+            mock_logger.info.assert_called_once_with('Cleaned up 1 excess batch sessions')
+
+        # Verify one session remains (deterministic based on dict iteration order)
+        assert len(_batch_sessions) == 1
+        # One of the sessions should remain
+        remaining_sessions = list(_batch_sessions.keys())
+        assert len(remaining_sessions) == 1
+        assert remaining_sessions[0] in ['session-1', 'session-2']
+
+    def test_cleanup_excess_sessions_empty_sessions_dict(self):
+        """Test cleanup when sessions dictionary is empty."""
+        global _batch_sessions
+
+        # Ensure sessions dict is empty
+        _batch_sessions.clear()
+
+        with patch(
+            'awslabs.cloudwatch_appsignals_mcp_server.batch_processing_utils.logger'
+        ) as mock_logger:
+            _cleanup_excess_sessions()
+
+            # Verify no logging occurred (no sessions to clean up)
+            mock_logger.info.assert_not_called()
+
+        # Verify sessions dict remains empty
+        assert len(_batch_sessions) == 0
+
+    def test_cleanup_excess_sessions_preserves_session_data(self):
+        """Test that cleanup preserves all data in remaining sessions."""
+        global _batch_sessions
+
+        # Create sessions with rich data
+        older_session = {
+            'session_id': 'old-session',
+            'created_at': '2024-01-01T09:00:00+00:00',
+            'last_activity': '2024-01-01T09:30:00+00:00',
+            'targets': [{'service': 'old-service'}],
+            'batches': [['batch1'], ['batch2']],
+            'current_batch_index': 1,
+            'status': 'in_progress',
+            'processed_batches': [{'batch': 'data'}],
+            'all_findings': [{'finding': 'old'}],
+        }
+        newer_session = {
+            'session_id': 'new-session',
+            'created_at': '2024-01-01T11:00:00+00:00',
+            'last_activity': '2024-01-01T11:30:00+00:00',
+            'targets': [{'service': 'new-service'}],
+            'batches': [['batch3'], ['batch4']],
+            'current_batch_index': 0,
+            'status': 'created',
+            'processed_batches': [],
+            'all_findings': [{'finding': 'new'}],
+        }
+
+        _batch_sessions['old-session'] = older_session
+        _batch_sessions['new-session'] = newer_session
+
+        _cleanup_excess_sessions()
+
+        # Verify newer session remains with all data intact
+        assert len(_batch_sessions) == 1
+        assert 'new-session' in _batch_sessions
+
+        remaining_session = _batch_sessions['new-session']
+        assert remaining_session['session_id'] == 'new-session'
+        assert remaining_session['created_at'] == '2024-01-01T11:00:00+00:00'
+        assert remaining_session['last_activity'] == '2024-01-01T11:30:00+00:00'
+        assert remaining_session['targets'] == [{'service': 'new-service'}]
+        assert remaining_session['batches'] == [['batch3'], ['batch4']]
+        assert remaining_session['current_batch_index'] == 0
+        assert remaining_session['status'] == 'created'
+        assert remaining_session['processed_batches'] == []
+        assert remaining_session['all_findings'] == [{'finding': 'new'}]
+
+    @patch('awslabs.cloudwatch_appsignals_mcp_server.batch_processing_utils.MAX_BATCH_SESSIONS', 3)
+    def test_cleanup_excess_sessions_different_limit(self):
+        """Test cleanup with different MAX_BATCH_SESSIONS limit."""
+        global _batch_sessions
+
+        # Create 5 sessions when limit is 3
+        sessions = [
+            ('session-1', '2024-01-01T08:00:00+00:00'),
+            ('session-2', '2024-01-01T09:00:00+00:00'),
+            ('session-3', '2024-01-01T10:00:00+00:00'),
+            ('session-4', '2024-01-01T11:00:00+00:00'),
+            ('session-5', '2024-01-01T12:00:00+00:00'),
+        ]
+
+        for session_id, created_at in sessions:
+            _batch_sessions[session_id] = {
+                'session_id': session_id,
+                'created_at': created_at,
+                'status': 'created',
+            }
+
+        with patch(
+            'awslabs.cloudwatch_appsignals_mcp_server.batch_processing_utils.logger'
+        ) as mock_logger:
+            _cleanup_excess_sessions()
+
+            # Verify cleanup was logged (5 sessions - 3 limit = 2 excess)
+            mock_logger.info.assert_called_once_with('Cleaned up 2 excess batch sessions')
+
+        # Verify only 3 newest sessions remain
+        assert len(_batch_sessions) == 3
+        assert 'session-3' in _batch_sessions
+        assert 'session-4' in _batch_sessions
+        assert 'session-5' in _batch_sessions
+        assert 'session-1' not in _batch_sessions
+        assert 'session-2' not in _batch_sessions
+
+    def test_cleanup_excess_sessions_integration_with_create_batch_session(
+        self, sample_targets, sample_input_obj
+    ):
+        """Test that cleanup is called during session creation and works correctly."""
+        global _batch_sessions
+
+        # Clear sessions and create one session manually (to exceed limit when next is created)
+        _batch_sessions.clear()
+        existing_session = {
+            'session_id': 'existing-session',
+            'created_at': '2024-01-01T09:00:00+00:00',
+            'status': 'created',
+        }
+        _batch_sessions['existing-session'] = existing_session
+
+        with patch(
+            'awslabs.cloudwatch_appsignals_mcp_server.batch_processing_utils.logger'
+        ) as mock_logger:
+            # Create new session (should trigger cleanup)
+            new_session_id = create_batch_session(
+                targets=sample_targets[:3],
+                input_obj=sample_input_obj,
+                region='us-east-1',
+                banner='Integration Test',
+            )
+
+            # Verify cleanup was logged (2 sessions - 1 limit = 1 excess)
+            cleanup_calls = [
+                call for call in mock_logger.info.call_args_list if 'Cleaned up' in str(call)
+            ]
+            assert len(cleanup_calls) == 1
+            assert 'Cleaned up 1 excess batch sessions' in str(cleanup_calls[0])
+
+        # Verify only the new session remains (it has a later timestamp)
+        assert len(_batch_sessions) == 1
+        assert new_session_id in _batch_sessions
+        assert 'existing-session' not in _batch_sessions

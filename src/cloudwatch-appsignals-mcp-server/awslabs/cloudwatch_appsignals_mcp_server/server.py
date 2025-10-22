@@ -73,10 +73,6 @@ from typing import Optional
 
 # Constants
 BATCH_SIZE_THRESHOLD = 5
-# NOTE: list_audit_findings API has a maximum limit of 10 results per call by default.
-# The max value is set to 10 due to API limitations and to
-# reduce MCP server latency for interactive auditing workflows.
-AUDIT_SERVICE_BATCH_SIZE_THRESHOLD = 10
 
 RUN_STATES = {'RUNNING': 'RUNNING', 'PASSED': 'PASSED', 'FAILED': 'FAILED'}
 
@@ -417,8 +413,8 @@ async def audit_services(
             f'⏰ Time: {unix_start}–{unix_end}\n'
         )
 
-        if len(normalized_targets) > AUDIT_SERVICE_BATCH_SIZE_THRESHOLD:
-            banner += f'📦 Batching: Processing {len(normalized_targets)} targets in batches of {AUDIT_SERVICE_BATCH_SIZE_THRESHOLD}\n'
+        if len(normalized_targets) > BATCH_SIZE_THRESHOLD:
+            banner += f'📦 Batching: Processing {len(normalized_targets)} targets in batches of {BATCH_SIZE_THRESHOLD}\n'
 
         banner += '\n'
 
@@ -432,14 +428,14 @@ async def audit_services(
             input_obj['Auditors'] = auditors_list
 
         # Interactive Batch Processing Logic
-        if len(normalized_targets) > AUDIT_SERVICE_BATCH_SIZE_THRESHOLD:
+        if len(normalized_targets) > BATCH_SIZE_THRESHOLD:
             # Create interactive batch session for large target lists
             session_id = create_batch_session(
                 targets=normalized_targets,
                 input_obj=input_obj,
                 region=region,
                 banner=banner,
-                batch_size=AUDIT_SERVICE_BATCH_SIZE_THRESHOLD,
+                batch_size=BATCH_SIZE_THRESHOLD,
                 auto_complete=None,  # Auto-decide based on target count
             )
 

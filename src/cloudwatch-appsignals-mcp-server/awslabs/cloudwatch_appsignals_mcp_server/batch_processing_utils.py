@@ -24,6 +24,9 @@ from typing import Any, Dict, List, Optional
 # Global storage for batch sessions (in production, this would be in a database)
 _batch_sessions: Dict[str, Dict[str, Any]] = {}
 
+# Configuration for session cache limits
+MAX_BATCH_SESSIONS = 1
+
 
 def create_batch_session(
     targets: List[Dict[str, Any]],
@@ -77,6 +80,9 @@ def create_batch_session(
 
     _batch_sessions[session_id] = session
     logger.info(f'Created batch session {session_id} with {len(batches)} batches')
+
+    # Clean up excess sessions if we exceed the limit
+    _cleanup_excess_sessions()
 
     return session_id
 
@@ -184,13 +190,23 @@ def process_next_batch(session_id: str, appsignals_client) -> Dict[str, Any]:
     return batch_result
 
 
-def cleanup_batch_sessions() -> None:
-    """Clean up all batch sessions from memory."""
+def _cleanup_excess_sessions() -> None:
+    """Remove oldest sessions if we exceed MAX_BATCH_SESSIONS limit."""
     global _batch_sessions
 
-    initial_count = len(_batch_sessions)
-    _batch_sessions.clear()
-    logger.info(f'Cleaned up all {initial_count} batch sessions')
+    if len(_batch_sessions) <= MAX_BATCH_SESSIONS:
+        return
+
+    # Sort sessions by creation time (oldest first)
+    sessions_by_age = sorted(_batch_sessions.items(), key=lambda x: x[1].get('created_at', ''))
+
+    # Remove oldest sessions until we're under the limit
+    excess_count = len(_batch_sessions) - MAX_BATCH_SESSIONS
+    for i in range(excess_count):
+        session_id, _ = sessions_by_age[i]
+        del _batch_sessions[session_id]
+
+    logger.info(f'Cleaned up {excess_count} excess batch sessions')
 
 
 def format_batch_result(batch_result: Dict[str, Any], session: Dict[str, Any]) -> str:

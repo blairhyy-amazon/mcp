@@ -20,15 +20,11 @@ def mock_batch_processing_utils():
         patch(
             'awslabs.cloudwatch_appsignals_mcp_server.batch_tools.format_batch_result'
         ) as mock_format,
-        patch(
-            'awslabs.cloudwatch_appsignals_mcp_server.batch_tools.cleanup_batch_sessions'
-        ) as mock_cleanup,
     ):
         yield {
             'process_next_batch': mock_process,
             'get_batch_session': mock_get_session,
             'format_batch_result': mock_format,
-            'cleanup_batch_sessions': mock_cleanup,
         }
 
 

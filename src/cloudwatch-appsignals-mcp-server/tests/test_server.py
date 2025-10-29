@@ -3050,3 +3050,111 @@ def test_filter_operation_targets_case_sensitive():
     assert operation_targets[0]['Data']['ServiceOperation']['MetricType'] == 'fault'  # unchanged
     assert operation_targets[1]['Data']['ServiceOperation']['MetricType'] == 'FAULT'  # unchanged
     assert has_wildcards is False
+
+
+def test_format_pagination_info_basic():
+    """Test _format_pagination_info basic functionality."""
+    from awslabs.cloudwatch_appsignals_mcp_server.server import _format_pagination_info
+
+    # Test with next_token (more pages available)
+    result = _format_pagination_info(
+        has_wildcards=True,
+        names_in_batch=['service1', 'service2'],
+        returned_next_token='token123',
+        unix_start=1640995200,
+        unix_end=1641081600,
+        tool_name='audit_services',
+        max_param_name='max_services',
+        max_param_value=5,
+        item_type='services',
+    )
+
+    assert '📊 Processed 2 services in this batch:' in result
+    assert '   • service1' in result
+    assert '   • service2' in result
+    assert '🔄 PAGINATION: More services available!' in result
+    assert 'audit_services(' in result
+    assert 'next_token="token123"' in result
+    assert 'max_services=5' in result
+
+
+def test_format_pagination_info_final_batch():
+    """Test _format_pagination_info for final batch (no next_token)."""
+    from awslabs.cloudwatch_appsignals_mcp_server.server import _format_pagination_info
+
+    result = _format_pagination_info(
+        has_wildcards=True,
+        names_in_batch=['final-service'],
+        returned_next_token=None,
+        unix_start=1640995200,
+        unix_end=1641081600,
+        tool_name='audit_services',
+        max_param_name='max_services',
+        max_param_value=5,
+        item_type='services',
+    )
+
+    assert '✅ PAGINATION: Complete! This was the last batch of services.' in result
+    assert '📊 Processed 1 services in final batch:' in result
+    assert '   • final-service' in result
+    assert 'audit_services(' not in result  # No continuation instructions
+
+
+def test_format_pagination_info_no_wildcards():
+    """Test _format_pagination_info returns empty when no wildcards."""
+    from awslabs.cloudwatch_appsignals_mcp_server.server import _format_pagination_info
+
+    result = _format_pagination_info(
+        has_wildcards=False,
+        names_in_batch=['service1'],
+        returned_next_token='token123',
+        unix_start=1640995200,
+        unix_end=1641081600,
+        tool_name='audit_services',
+        max_param_name='max_services',
+        max_param_value=5,
+        item_type='services',
+    )
+
+    assert result == ''
+
+
+def test_format_pagination_info_empty_names():
+    """Test _format_pagination_info returns empty when no names in batch."""
+    from awslabs.cloudwatch_appsignals_mcp_server.server import _format_pagination_info
+
+    result = _format_pagination_info(
+        has_wildcards=True,
+        names_in_batch=[],
+        returned_next_token='token123',
+        unix_start=1640995200,
+        unix_end=1641081600,
+        tool_name='audit_services',
+        max_param_name='max_services',
+        max_param_value=5,
+        item_type='services',
+    )
+
+    assert result == ''
+
+
+def test_format_pagination_info_slos():
+    """Test _format_pagination_info with SLO item type."""
+    from awslabs.cloudwatch_appsignals_mcp_server.server import _format_pagination_info
+
+    result = _format_pagination_info(
+        has_wildcards=True,
+        names_in_batch=['slo1', 'slo2'],
+        returned_next_token='slo_token',
+        unix_start=1640995200,
+        unix_end=1641081600,
+        tool_name='audit_slos',
+        max_param_name='max_slos',
+        max_param_value=3,
+        item_type='SLOs',
+    )
+
+    assert '📊 Processed 2 SLOs in this batch:' in result
+    assert '🔄 PAGINATION: More SLOs available!' in result
+    assert 'audit_slos(' in result
+    assert 'max_slos=3' in result

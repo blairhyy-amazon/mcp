@@ -169,8 +169,8 @@ async def audit_services(
         description='Optional. Token for pagination through services from list_services API. Use this to continue from where the previous call left off when processing wildcard patterns.',
     ),
     max_services: int = Field(
-        default=5,
-        description='Optional. Maximum number of services to process per call when using wildcard patterns (default: 5). This controls pagination size for service discovery.',
+        default=BATCH_SIZE_THRESHOLD,
+        description='Optional. Maximum number of services to process per call when using wildcard patterns (default: 5). RECOMMENDED: Use the default value (5) for optimal performance. If adjustments are needed, keep the value less than 10 to prevent API throttling and ensure efficient processing.',
     ),
 ) -> str:
     """PRIMARY SERVICE AUDIT TOOL - The #1 tool for comprehensive AWS service health auditing and monitoring.
@@ -410,9 +410,6 @@ async def audit_services(
             f'⏰ Time: {unix_start}–{unix_end}\n'
         )
 
-        if len(normalized_targets) > BATCH_SIZE_THRESHOLD:
-            banner += f'📦 Batching: Processing {len(normalized_targets)} targets in batches of {BATCH_SIZE_THRESHOLD}\n'
-
         banner += '\n'
 
         # Build CLI input
@@ -425,7 +422,7 @@ async def audit_services(
             input_obj['Auditors'] = auditors_list
 
         # Execute audit API using shared utility
-        result = await execute_audit_api(input_obj, region, banner)
+        result = await execute_audit_api(input_obj, banner)
 
         # Add prominent pagination information when wildcards were used
         result += format_pagination_info(
@@ -472,8 +469,8 @@ async def audit_slos(
         description='Optional. Token for pagination through SLOs from list_service_level_objectives API. Use this to continue from where the previous call left off when processing wildcard patterns.',
     ),
     max_slos: int = Field(
-        default=5,
-        description='Optional. Maximum number of SLOs to process per call when using wildcard patterns (default: 5). This controls pagination size for SLO discovery.',
+        default=BATCH_SIZE_THRESHOLD,
+        description='Optional. Maximum number of SLOs to process per call when using wildcard patterns (default: 5). RECOMMENDED: Use the default value (5) for optimal performance. If adjustments are needed, keep the value less than 10 to prevent API throttling and ensure efficient processing.',
     ),
 ) -> str:
     """PRIMARY SLO AUDIT TOOL - The #1 tool for comprehensive SLO compliance monitoring and breach analysis.
@@ -662,9 +659,6 @@ async def audit_slos(
             f'⏰ Time: {unix_start}–{unix_end}\n'
         )
 
-        if len(slo_only_targets) > BATCH_SIZE_THRESHOLD:
-            banner += f'📦 Batching: Processing {len(slo_only_targets)} targets in batches of {BATCH_SIZE_THRESHOLD}\n'
-
         banner += '\n'
 
         # Build CLI input for SLO audit
@@ -677,7 +671,7 @@ async def audit_slos(
             input_obj['Auditors'] = auditors_list
 
         # Execute audit API using shared utility
-        result = await execute_audit_api(input_obj, region, banner)
+        result = await execute_audit_api(input_obj, banner)
 
         # Add prominent pagination information when wildcards were used
         result += format_pagination_info(
@@ -724,8 +718,8 @@ async def audit_service_operations(
         description='Optional. Token for pagination through services from list_services API. Use this to continue from where the previous call left off when processing wildcard patterns.',
     ),
     max_services: int = Field(
-        default=5,
-        description='Optional. Maximum number of services to process per call when using wildcard patterns (default: 5). This controls pagination size for service discovery.',
+        default=BATCH_SIZE_THRESHOLD,
+        description='Optional. Maximum number of services to process per call when using wildcard patterns (default: 5). RECOMMENDED: Use the default value (5) for optimal performance. If adjustments are needed, keep the value less than 10 to prevent API throttling and ensure efficient processing.',
     ),
 ) -> str:
     """🥇 PRIMARY OPERATION AUDIT TOOL - The #1 RECOMMENDED tool for operation-specific analysis and performance investigation.
@@ -912,9 +906,6 @@ async def audit_service_operations(
             f'⏰ Time: {unix_start}–{unix_end}\n'
         )
 
-        if len(operation_only_targets) > BATCH_SIZE_THRESHOLD:
-            banner += f'📦 Batching: Processing {len(operation_only_targets)} targets in batches of {BATCH_SIZE_THRESHOLD}\n'
-
         banner += '\n'
 
         # Build CLI input for operation audit
@@ -927,7 +918,7 @@ async def audit_service_operations(
             input_obj['Auditors'] = auditors_list
 
         # Execute audit API using shared utility
-        result = await execute_audit_api(input_obj, region, banner)
+        result = await execute_audit_api(input_obj, banner)
 
         # Add prominent pagination information when wildcards were used
         result += format_pagination_info(

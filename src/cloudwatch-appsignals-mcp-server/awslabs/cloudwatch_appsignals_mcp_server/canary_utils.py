@@ -904,7 +904,7 @@ async def get_canary_metrics_and_service_insights(canary_name: str, region: str)
             'AuditTargets': [{'Type': 'canary', 'Data': {'Canary': {'CanaryName': canary_name}}}],
             'Auditors': ['canary', 'operation_metric', 'trace'],
         }
-        return await execute_audit_api(audit_input, region, f'Canary Analysis for {canary_name}\n')
+        return await execute_audit_api(audit_input, f'Canary Analysis for {canary_name}\n')
 
     except Exception as e:
         return f'ListAuditFindings API unavailable: {str(e)}'

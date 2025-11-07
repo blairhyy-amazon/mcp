@@ -65,7 +65,7 @@ class TestExecuteAuditApi:
         mock_appsignals_client.list_audit_findings.return_value = mock_response
 
         with patch('builtins.open', mock_open()):
-            result = await execute_audit_api(sample_input_obj, 'us-east-1', 'Test Banner\n')
+            result = await execute_audit_api(sample_input_obj, 'Test Banner\n')
 
         assert 'Test Banner' in result
         assert 'finding-1' in result
@@ -73,32 +73,29 @@ class TestExecuteAuditApi:
         mock_appsignals_client.list_audit_findings.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_execute_audit_api_multiple_batches(self, mock_appsignals_client):
-        """Test API execution with multiple batches."""
-        # Create input with more than 5 targets to trigger batching
+    async def test_execute_audit_api_multiple_targets(self, mock_appsignals_client):
+        """Test API execution with multiple targets (no batching)."""
+        # Create input with multiple targets (no batching anymore)
         input_obj = {
             'StartTime': 1640995200,
             'EndTime': 1641081600,
             'AuditTargets': [
                 {'Type': 'service', 'Data': {'Service': {'Name': f'service-{i}'}}}
-                for i in range(7)  # 7 targets = 2 batches
+                for i in range(7)  # All targets processed in single call
             ],
         }
 
-        mock_responses = [
-            {'AuditFindings': [{'FindingId': 'finding-1'}]},
-            {'AuditFindings': [{'FindingId': 'finding-2'}]},
-        ]
-        mock_appsignals_client.list_audit_findings.side_effect = mock_responses
+        mock_response = {'AuditFindings': [{'FindingId': 'finding-1'}, {'FindingId': 'finding-2'}]}
+        mock_appsignals_client.list_audit_findings.return_value = mock_response
 
         with patch('builtins.open', mock_open()):
-            result = await execute_audit_api(input_obj, 'us-east-1', 'Test Banner\n')
+            result = await execute_audit_api(input_obj, 'Test Banner\n')
 
         assert 'finding-1' in result
         assert 'finding-2' in result
-        # The actual implementation returns aggregated AuditFindings, not TotalBatches
         assert '"AuditFindings"' in result
-        assert mock_appsignals_client.list_audit_findings.call_count == 2
+        # Should be called only once (no batching)
+        assert mock_appsignals_client.list_audit_findings.call_count == 1
 
     @pytest.mark.asyncio
     async def test_execute_audit_api_no_findings(self, mock_appsignals_client, sample_input_obj):
@@ -107,7 +104,7 @@ class TestExecuteAuditApi:
         mock_appsignals_client.list_audit_findings.return_value = mock_response
 
         with patch('builtins.open', mock_open()):
-            result = await execute_audit_api(sample_input_obj, 'us-east-1', 'Test Banner\n')
+            result = await execute_audit_api(sample_input_obj, 'Test Banner\n')
 
         assert 'Test Banner' in result
         # The actual implementation returns empty AuditFindings array, not TotalFindingsCount
@@ -121,10 +118,9 @@ class TestExecuteAuditApi:
         mock_appsignals_client.list_audit_findings.side_effect = Exception('API Error')
 
         with patch('builtins.open', mock_open()):
-            result = await execute_audit_api(sample_input_obj, 'us-east-1', 'Test Banner\n')
+            result = await execute_audit_api(sample_input_obj, 'Test Banner\n')
 
         assert 'API call failed: API Error' in result
-        assert 'BatchErrors' in result
 
     @pytest.mark.asyncio
     async def test_execute_audit_api_log_path_handling(
@@ -138,7 +134,7 @@ class TestExecuteAuditApi:
         with patch.dict(os.environ, {'AUDITOR_LOG_PATH': '/custom/path'}):
             with patch('os.makedirs') as mock_makedirs:
                 with patch('builtins.open', mock_open()):
-                    await execute_audit_api(sample_input_obj, 'us-east-1', 'Test Banner\n')
+                    await execute_audit_api(sample_input_obj, 'Test Banner\n')
                     mock_makedirs.assert_called()
 
     @pytest.mark.asyncio
@@ -163,9 +159,7 @@ class TestExecuteAuditApi:
             with patch('os.makedirs', side_effect=mock_makedirs):
                 with patch('tempfile.gettempdir', return_value='/tmp'):
                     with patch('builtins.open', mock_open()):
-                        result = await execute_audit_api(
-                            sample_input_obj, 'us-east-1', 'Test Banner\n'
-                        )
+                        result = await execute_audit_api(sample_input_obj, 'Test Banner\n')
                         # Should fallback to temp directory
                         assert result is not None
                         assert len(makedirs_calls) == 2  # First failed, second succeeded

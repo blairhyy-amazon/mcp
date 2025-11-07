@@ -609,8 +609,8 @@ class TestAuditSlos:
             assert 'Error: Failed to expand SLO wildcard patterns. SLO expansion failed' in result
 
     @pytest.mark.asyncio
-    async def test_successful_execution_with_batching(self, mock_aws_clients):
-        """Test audit_slos successful execution with batching."""
+    async def test_successful_execution_with_multiple_targets(self, mock_aws_clients):
+        """Test audit_slos successful execution with multiple targets (no batching)."""
         # Create SLO targets with wildcard patterns to avoid next_token validation error
         slo_targets = '[{"Type":"slo","Data":{"Slo":{"SloName":"*"}}}]'
 
@@ -645,9 +645,7 @@ class TestAuditSlos:
                 [f'test-slo-{i}' for i in range(7)],
             )
             mock_execute.return_value = (
-                '[MCP-SLO] Application Signals SLO Compliance Audit\n'
-                '📦 Batching: Processing 7 targets in batches of 5\n'
-                'test-finding-1'
+                '[MCP-SLO] Application Signals SLO Compliance Audit\ntest-finding-1'
             )
 
             result = await audit_slos(
@@ -657,17 +655,17 @@ class TestAuditSlos:
                 auditors='slo,trace',
             )
 
-            # Verify result contains expected content
+            # Verify result contains expected content (no batching messages)
             assert '[MCP-SLO] Application Signals SLO Compliance Audit' in result
-            assert '📦 Batching: Processing 7 targets in batches of 5' in result
             assert 'test-finding-1' in result
+            assert '📦 Batching:' not in result  # No batching anymore
 
-            # Verify the execute_audit_api was called
+            # Verify the execute_audit_api was called once (no batching)
             mock_execute.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_successful_execution_without_batching(self, mock_aws_clients):
-        """Test audit_slos successful execution without batching."""
+    async def test_successful_execution_with_few_targets(self, mock_aws_clients):
+        """Test audit_slos successful execution with few targets."""
         # Create fewer SLO targets with wildcard patterns to avoid next_token validation error
         slo_targets = '[{"Type":"slo","Data":{"Slo":{"SloName":"*"}}}]'
 
@@ -711,10 +709,10 @@ class TestAuditSlos:
 
             # Verify result contains expected content
             assert '[MCP-SLO] Application Signals SLO Compliance Audit' in result
-            assert '📦 Batching:' not in result  # No batching for < 5 targets
             assert 'test-finding-2' in result
+            assert '📦 Batching:' not in result  # No batching
 
-            # Verify the execute_audit_api was called once (no batching)
+            # Verify the execute_audit_api was called once
             mock_execute.assert_called_once()
 
 
@@ -833,9 +831,9 @@ class TestAuditServiceOperations:
             )
 
     @pytest.mark.asyncio
-    async def test_successful_execution_with_batching(self, mock_aws_clients):
-        """Test audit_service_operations successful execution with batching."""
-        # Create enough operation targets with wildcard patterns to trigger batching (> BATCH_SIZE_THRESHOLD = 5)
+    async def test_successful_execution_with_multiple_targets(self, mock_aws_clients):
+        """Test audit_service_operations successful execution with multiple targets (no batching)."""
+        # Create multiple operation targets with wildcard patterns
         operation_targets = (
             '[{"Type":"service_operation","Data":{"ServiceOperation":'
             '{"Service":{"Type":"Service","Name":"*"},'
@@ -847,10 +845,10 @@ class TestAuditServiceOperations:
         mock_appsignals_client.list_audit_findings.return_value = {
             'AuditFindings': [
                 {
-                    'FindingId': 'test-finding-op-batch',
+                    'FindingId': 'test-finding-op-multiple',
                     'Severity': 'WARNING',
                     'Title': 'Operation Latency Issue',
-                    'Description': 'Test operation batching finding',
+                    'Description': 'Test operation multiple targets finding',
                 }
             ]
         }
@@ -884,8 +882,7 @@ class TestAuditServiceOperations:
             )
             mock_execute.return_value = (
                 '[MCP-OPERATION] Application Signals Operation Performance Audit\n'
-                '📦 Batching: Processing 7 targets in batches of 5\n'
-                'test-finding-op-batch'
+                'test-finding-op-multiple'
             )
 
             result = await audit_service_operations(
@@ -895,12 +892,12 @@ class TestAuditServiceOperations:
                 auditors='operation_metric,trace',
             )
 
-            # Verify result contains expected content including batching message
+            # Verify result contains expected content (no batching messages)
             assert '[MCP-OPERATION] Application Signals Operation Performance Audit' in result
-            assert '📦 Batching: Processing 7 targets in batches of 5' in result
-            assert 'test-finding-op-batch' in result
+            assert 'test-finding-op-multiple' in result
+            assert '📦 Batching:' not in result  # No batching anymore
 
-            # Verify the execute_audit_api was called
+            # Verify the execute_audit_api was called once (no batching)
             mock_execute.assert_called_once()
 
     @pytest.mark.asyncio

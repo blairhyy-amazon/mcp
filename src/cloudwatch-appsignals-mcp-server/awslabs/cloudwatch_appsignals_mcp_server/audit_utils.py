@@ -23,13 +23,15 @@ from typing import Any, Dict, List, Optional, Union
 
 
 # Constants
-DEFAULT_BATCH_SIZE = 5
 FUZZY_MATCH_THRESHOLD = 30  # Minimum similarity score for fuzzy matching
 HIGH_CONFIDENCE_MATCH_THRESHOLD = 85  # High confidence threshold for exact fuzzy matches
 
 
-async def execute_audit_api(input_obj: Dict[str, Any], region: str, banner: str) -> str:
-    """Execute the Application Signals audit API call with the given input object."""
+async def execute_audit_api(input_obj: Dict[str, Any], banner: str) -> str:
+    """Execute the Application Signals audit API call with the given input object.
+
+    Note: As of 2025/11/7, the list_audit_findings API can only take up to 10 services in the AuditTargets.
+    """
     from .aws_clients import appsignals_client
 
     # File log path
@@ -46,187 +48,110 @@ async def execute_audit_api(input_obj: Dict[str, Any], region: str, banner: str)
         os.makedirs(temp_dir, exist_ok=True)
         log_path = os.path.join(temp_dir, 'aws_api.log')
 
-    # Process targets in batches if needed
-    targets = input_obj.get('AuditTargets', [])
-    batch_size = DEFAULT_BATCH_SIZE
-    target_batches = []
+    # Build API input
+    api_input_obj = {
+        'StartTime': datetime.fromtimestamp(input_obj['StartTime'], tz=timezone.utc),
+        'EndTime': datetime.fromtimestamp(input_obj['EndTime'], tz=timezone.utc),
+        'AuditTargets': input_obj.get('AuditTargets', []),
+    }
+    if 'Auditors' in input_obj:
+        api_input_obj['Auditors'] = input_obj['Auditors']
 
-    if len(targets) > batch_size:
-        logger.info(f'Processing {len(targets)} targets in batches of {batch_size}')
-        for i in range(0, len(targets), batch_size):
-            batch = targets[i : i + batch_size]
-            target_batches.append(batch)
-    else:
-        target_batches.append(targets)
+    # Log API invocation details
+    api_pretty_input = json.dumps(
+        {
+            'StartTime': input_obj['StartTime'],
+            'EndTime': input_obj['EndTime'],
+            'AuditTargets': input_obj.get('AuditTargets', []),
+            'Auditors': input_obj.get('Auditors', []),
+        },
+        indent=2,
+    )
 
-    all_batch_results = []
+    # Also log the actual api_input_obj that will be sent to AWS API
+    api_input_for_logging = {
+        'StartTime': api_input_obj['StartTime'].isoformat(),
+        'EndTime': api_input_obj['EndTime'].isoformat(),
+        'AuditTargets': api_input_obj['AuditTargets'],
+    }
+    if 'Auditors' in api_input_obj:
+        api_input_for_logging['Auditors'] = api_input_obj['Auditors']
 
-    for batch_idx, batch_targets in enumerate(target_batches, 1):
-        logger.info(
-            f'Processing batch {batch_idx}/{len(target_batches)} with {len(batch_targets)} targets'
-        )
+    api_payload_json = json.dumps(api_input_for_logging, indent=2)
 
-        # Build API input for this batch
-        batch_input_obj = {
-            'StartTime': datetime.fromtimestamp(input_obj['StartTime'], tz=timezone.utc),
-            'EndTime': datetime.fromtimestamp(input_obj['EndTime'], tz=timezone.utc),
-            'AuditTargets': batch_targets,
-        }
-        if 'Auditors' in input_obj:
-            batch_input_obj['Auditors'] = input_obj['Auditors']
+    logger.info('═' * 80)
+    logger.info(f'{datetime.now(timezone.utc).isoformat()}')
+    logger.info(banner.strip())
+    logger.info('---- API INVOCATION ----')
+    logger.info('appsignals_client.list_audit_findings()')
+    logger.info('---- API PARAMETERS (JSON) ----')
+    logger.info(api_pretty_input)
+    logger.info('---- ACTUAL AWS API PAYLOAD ----')
+    logger.info(api_payload_json)
+    logger.info('---- END PARAMETERS ----')
 
-        # Log API invocation details
-        api_pretty_input = json.dumps(
-            {
-                'StartTime': input_obj['StartTime'],
-                'EndTime': input_obj['EndTime'],
-                'AuditTargets': batch_targets,
-                'Auditors': input_obj.get('Auditors', []),
-            },
-            indent=2,
-        )
+    # Write detailed payload to log file
+    try:
+        with open(log_path, 'a') as f:
+            f.write('═' * 80 + '\n')
+            f.write(f'{datetime.now(timezone.utc).isoformat()}\n')
+            f.write(banner.strip() + '\n')
+            f.write('---- API INVOCATION ----\n')
+            f.write('appsignals_client.list_audit_findings()\n')
+            f.write('---- API PARAMETERS (JSON) ----\n')
+            f.write(api_pretty_input + '\n')
+            f.write('---- ACTUAL AWS API PAYLOAD ----\n')
+            f.write(api_payload_json + '\n')
+            f.write('---- END PARAMETERS ----\n\n')
+    except Exception as log_error:
+        logger.warning(f'Failed to write audit log to {log_path}: {log_error}')
 
-        # Also log the actual batch_input_obj that will be sent to AWS API
-        batch_input_for_logging = {
-            'StartTime': batch_input_obj['StartTime'].isoformat(),
-            'EndTime': batch_input_obj['EndTime'].isoformat(),
-            'AuditTargets': batch_input_obj['AuditTargets'],
-        }
-        if 'Auditors' in batch_input_obj:
-            batch_input_for_logging['Auditors'] = batch_input_obj['Auditors']
+    # Call the Application Signals API
+    try:
+        response = appsignals_client.list_audit_findings(**api_input_obj)  # type: ignore[attr-defined]
+        final_result = {'AuditFindings': response.get('AuditFindings', [])}
 
-        batch_payload_json = json.dumps(batch_input_for_logging, indent=2)
+        # Format and log output
+        observation_text = json.dumps(final_result, indent=2, default=str)
 
-        logger.info('═' * 80)
-        logger.info(
-            f'BATCH {batch_idx}/{len(target_batches)} - {datetime.now(timezone.utc).isoformat()}'
-        )
-        logger.info(banner.strip())
-        logger.info('---- API INVOCATION ----')
-        logger.info('appsignals_client.list_audit_findings()')
-        logger.info('---- API PARAMETERS (JSON) ----')
-        logger.info(api_pretty_input)
-        logger.info('---- ACTUAL AWS API PAYLOAD ----')
-        logger.info(batch_payload_json)
-        logger.info('---- END PARAMETERS ----')
-
-        # Write detailed payload to log file
-        try:
-            with open(log_path, 'a') as f:
-                f.write('═' * 80 + '\n')
-                f.write(
-                    f'BATCH {batch_idx}/{len(target_batches)} - {datetime.now(timezone.utc).isoformat()}\n'
-                )
-                f.write(banner.strip() + '\n')
-                f.write('---- API INVOCATION ----\n')
-                f.write('appsignals_client.list_audit_findings()\n')
-                f.write('---- API PARAMETERS (JSON) ----\n')
-                f.write(api_pretty_input + '\n')
-                f.write('---- ACTUAL AWS API PAYLOAD ----\n')
-                f.write(batch_payload_json + '\n')
-                f.write('---- END PARAMETERS ----\n\n')
-        except Exception as log_error:
-            logger.warning(f'Failed to write audit log to {log_path}: {log_error}')
-
-        # Call the Application Signals API for this batch
-        try:
-            response = appsignals_client.list_audit_findings(**batch_input_obj)  # type: ignore[attr-defined]
-
-            # Format and log output for this batch
-            observation_text = json.dumps(response, indent=2, default=str)
-            all_batch_results.append(response)
-
-            if not response.get('AuditFindings'):
-                try:
-                    with open(log_path, 'a') as f:
-                        f.write(f'📭 Batch {batch_idx}: No findings returned.\n')
-                        f.write('---- END RESPONSE ----\n\n')
-                except Exception as log_error:
-                    logger.warning(f'Failed to write audit log to {log_path}: {log_error}')
-                logger.info(f'📭 Batch {batch_idx}: No findings returned.\n---- END RESPONSE ----')
-            else:
-                try:
-                    with open(log_path, 'a') as f:
-                        f.write(f'---- BATCH {batch_idx} API RESPONSE (JSON) ----\n')
-                        f.write(observation_text + '\n')
-                        f.write('---- END RESPONSE ----\n\n')
-                except Exception as log_error:
-                    logger.warning(f'Failed to write audit log to {log_path}: {log_error}')
-                logger.info(
-                    f'---- BATCH {batch_idx} API RESPONSE (JSON) ----\n'
-                    + observation_text
-                    + '\n---- END RESPONSE ----'
-                )
-
-        except Exception as e:
-            error_msg = str(e)
+        if not response.get('AuditFindings'):
             try:
                 with open(log_path, 'a') as f:
-                    f.write(f'---- BATCH {batch_idx} API ERROR ----\n')
-                    f.write(error_msg + '\n')
-                    f.write('---- END ERROR ----\n\n')
+                    f.write('📭 No findings returned.\n')
+                    f.write('---- END RESPONSE ----\n\n')
             except Exception as log_error:
                 logger.warning(f'Failed to write audit log to {log_path}: {log_error}')
-            logger.error(
-                f'---- BATCH {batch_idx} API ERROR ----\n' + error_msg + '\n---- END ERROR ----'
+            logger.info('📭 No findings returned.\n---- END RESPONSE ----')
+        else:
+            try:
+                with open(log_path, 'a') as f:
+                    f.write('---- API RESPONSE (JSON) ----\n')
+                    f.write(observation_text + '\n')
+                    f.write('---- END RESPONSE ----\n\n')
+            except Exception as log_error:
+                logger.warning(f'Failed to write audit log to {log_path}: {log_error}')
+            logger.info(
+                '---- API RESPONSE (JSON) ----\n' + observation_text + '\n---- END RESPONSE ----'
             )
 
-            batch_error_result = {
-                'batch_index': batch_idx,
-                'error': f'API call failed: {error_msg}',
-                'targets_count': len(batch_targets),
-            }
-            all_batch_results.append(batch_error_result)
-            continue
+        return banner + observation_text
 
-    # Aggregate results from all batches
-    if not all_batch_results:
-        return banner + 'Result: No findings from any batch.'
+    except Exception as e:
+        error_msg = str(e)
+        try:
+            with open(log_path, 'a') as f:
+                f.write('---- API ERROR ----\n')
+                f.write(error_msg + '\n')
+                f.write('---- END ERROR ----\n\n')
+        except Exception as log_error:
+            logger.warning(f'Failed to write audit log to {log_path}: {log_error}')
+        logger.error('---- API ERROR ----\n' + error_msg + '\n---- END ERROR ----')
 
-    # Aggregate the findings from all successful batches
-    aggregated_findings = []
-    total_targets_processed = 0
-    failed_batches = 0
-
-    for batch_result in all_batch_results:
-        if isinstance(batch_result, dict):
-            if 'error' in batch_result:
-                failed_batches += 1
-                continue
-
-            batch_findings = batch_result.get('AuditFindings', [])
-            aggregated_findings.extend(batch_findings)
-
-            # Count targets processed (this batch)
-            # Get the batch size from the original targets list
-            current_batch_size = min(
-                DEFAULT_BATCH_SIZE,
-                len(targets)
-                - (len(aggregated_findings) // DEFAULT_BATCH_SIZE) * DEFAULT_BATCH_SIZE,
-            )
-            total_targets_processed += current_batch_size
-
-    # Create final aggregated response
-    final_result = {
-        'AuditFindings': aggregated_findings,
-    }
-
-    # Add any error information if there were failed batches
-    if failed_batches > 0:
-        error_details = []
-        for batch_result in all_batch_results:
-            if isinstance(batch_result, dict) and 'error' in batch_result:
-                error_details.append(
-                    {
-                        'batch': batch_result['batch_index'],
-                        'error': batch_result['error'],
-                        'targets_count': batch_result['targets_count'],
-                    }
-                )
-        final_result['BatchErrors'] = error_details
-
-    final_observation_text = json.dumps(final_result, indent=2, default=str)
-    return banner + final_observation_text
+        error_result = {
+            'error': f'API call failed: {error_msg}',
+        }
+        error_observation_text = json.dumps(error_result, indent=2, default=str)
+        return banner + error_observation_text
 
 
 def _create_service_target(

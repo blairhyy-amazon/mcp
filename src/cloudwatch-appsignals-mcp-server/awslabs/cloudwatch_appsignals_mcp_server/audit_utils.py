@@ -209,6 +209,13 @@ async def execute_audit_api(input_obj: Dict[str, Any], region: str, banner: str)
     # Create final aggregated response
     final_result = {
         'AuditFindings': aggregated_findings,
+        'BatchSummary': {
+            'TotalBatches': len(target_batches),
+            'SuccessfulBatches': len(target_batches) - failed_batches,
+            'FailedBatches': failed_batches,
+            'TotalTargetsProcessed': total_targets_processed,
+            'TotalFindingsCount': len(aggregated_findings),
+        },
     }
 
     # Add any error information if there were failed batches

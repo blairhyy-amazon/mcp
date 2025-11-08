@@ -96,7 +96,7 @@ class TestExecuteAuditApi:
 
         assert 'finding-1' in result
         assert 'finding-2' in result
-        # The actual implementation returns aggregated AuditFindings, not TotalBatches
+        assert 'TotalBatches' in result
         assert '"AuditFindings"' in result
         assert mock_appsignals_client.list_audit_findings.call_count == 2
 
@@ -110,7 +110,7 @@ class TestExecuteAuditApi:
             result = await execute_audit_api(sample_input_obj, 'us-east-1', 'Test Banner\n')
 
         assert 'Test Banner' in result
-        # The actual implementation returns empty AuditFindings array, not TotalFindingsCount
+        assert 'TotalFindingsCount": 0' in result
         assert '"AuditFindings": []' in result
 
     @pytest.mark.asyncio
